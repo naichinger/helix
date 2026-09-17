@@ -71,6 +71,27 @@ const HEADER_HEIGHT: u16 = 1;
 const SEPARATOR_HEIGHT: u16 = 1;
 
 impl Component for Hover {
+    fn render_native(
+        &mut self,
+        area: Rect,
+        _surface: &mut Buffer,
+        cx: &mut Context,
+        widgets: &mut Vec<crate::frontend::Widget>,
+    ) {
+        let (header, contents) = self.content();
+        let title = header
+            .as_ref()
+            .map(|header| String::from(header.parse(Some(&cx.editor.theme))))
+            .unwrap_or_else(|| "Hover".into());
+        widgets.push(crate::frontend::Widget::new(
+            area,
+            cx.editor.theme.get("ui.popup"),
+            crate::frontend::WidgetContent::Document {
+                title,
+                blocks: contents.native_blocks(&cx.editor.theme),
+            },
+        ));
+    }
     fn render(&mut self, area: Rect, surface: &mut Buffer, cx: &mut Context) {
         let margin = Margin::all(1);
         let area = area.inner(margin);

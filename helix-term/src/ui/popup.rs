@@ -259,6 +259,33 @@ impl<T: Component> Popup<T> {
 }
 
 impl<T: Component> Component for Popup<T> {
+    fn render_native(
+        &mut self,
+        viewport: Rect,
+        surface: &mut Surface,
+        cx: &mut Context,
+        widgets: &mut Vec<crate::frontend::Widget>,
+    ) {
+        let info = self.render_info(viewport, cx.editor);
+        self.area = info.area;
+        let start = widgets.len();
+        let previous_scroll = cx.scroll;
+        cx.scroll = Some(self.scroll_half_pages * (info.area.height as usize / 2));
+        self.contents.render_native(info.area, surface, cx, widgets);
+        for widget in &mut widgets[start..] {
+            widget.scroll = cx.scroll.unwrap_or_default();
+        }
+        cx.scroll = previous_scroll;
+    }
+
+    fn handle_ui_event(
+        &mut self,
+        event: &crate::frontend::UiEvent,
+        cx: &mut Context,
+    ) -> EventResult {
+        self.contents.handle_ui_event(event, cx)
+    }
+
     fn handle_event(&mut self, event: &Event, cx: &mut Context) -> EventResult {
         let key = match event {
             Event::Key(event) => *event,

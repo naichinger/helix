@@ -1,8 +1,10 @@
 mod backend;
 mod clipboard;
+mod design;
 mod input;
 mod surface;
 mod view;
+mod widgets;
 
 use anyhow::{Context as _, Result};
 use backend::{Frame, SurfaceBackend};
@@ -51,20 +53,25 @@ fn run() -> Result<i32> {
         helix_stdx::env::set_current_working_dir(path)?;
     }
     helix_term::logging::init_file(
-        if args.verbosity == 0 {
+        if args.verbosity == 0 && std::env::var_os("HELIX_GPUI_TRACE_LATENCY").is_some() {
+            log::LevelFilter::Info
+        } else if args.verbosity == 0 {
             log::LevelFilter::Warn
         } else {
             log::LevelFilter::Debug
         },
         &helix_loader::log_file(),
     )?;
-    let config = match Config::load_default() {
+    let mut config = match Config::load_default() {
         Ok(config) => config,
         Err(ConfigLoadError::Error(err)) if err.kind() == std::io::ErrorKind::NotFound => {
             Config::default()
         }
         Err(err) => anyhow::bail!("Cannot load configuration: {err}"),
     };
+    if config.theme.is_none() {
+        config.theme = Some(helix_view::theme::Config::Constant("helix_gpui".into()));
+    }
     let trust =
         helix_loader::workspace_trust::WorkspaceTrust::new((&config.editor.workspace_trust).into());
     let languages = helix_core::config::user_lang_loader(&trust)?;
@@ -78,6 +85,7 @@ fn run() -> Result<i32> {
     let worker = std::thread::Builder::new()
         .name("helix-editor".into())
         .spawn(move || {
+            let native_frames = frames_tx.clone();
             let result =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<i32> {
                     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -87,6 +95,9 @@ fn run() -> Result<i32> {
                         let mut app = Application::new_with_backend(
                             args, config, languages, trust, backend, false,
                         )?;
+                        app.set_frontend_renderer(Box::new(move |frame| {
+                            native_frames.send_replace(Arc::new(Frame::from_native(frame)));
+                        }));
                         app.editor.registers.set_clipboard_provider(
                             helix_view::clipboard::ClipboardProvider::Native(
                                 helix_view::clipboard::NativeClipboardProvider(Arc::new(
@@ -113,7 +124,7 @@ fn run() -> Result<i32> {
     let window_error = Arc::new(Mutex::new(None));
     let startup_error = window_error.clone();
     gpui::Application::new().run(move |cx| {
-        view::install_menus(cx);
+        view::install_shortcuts(cx);
         clipboard::connect(clipboard_rx, cx);
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {

@@ -52,6 +52,25 @@ fn clip_rect_relative(rect: Rect, percent_horizontal: u8, percent_vertical: u8) 
 }
 
 impl<T: Component + 'static> Component for Overlay<T> {
+    fn render_native(
+        &mut self,
+        area: Rect,
+        frame: &mut Buffer,
+        ctx: &mut Context,
+        widgets: &mut Vec<crate::frontend::Widget>,
+    ) {
+        self.content
+            .render_native((self.calc_child_size)(area), frame, ctx, widgets);
+    }
+
+    fn handle_ui_event(
+        &mut self,
+        event: &crate::frontend::UiEvent,
+        ctx: &mut Context,
+    ) -> EventResult {
+        self.content.handle_ui_event(event, ctx)
+    }
+
     fn render(&mut self, area: Rect, frame: &mut Buffer, ctx: &mut Context) {
         let dimensions = (self.calc_child_size)(area);
         self.content.render(dimensions, frame, ctx)

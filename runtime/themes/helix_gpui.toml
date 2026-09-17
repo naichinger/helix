@@ -1,0 +1,55 @@
+# Neutral desktop palette inspired by Zeron. Used by hx-gpui when no theme is configured.
+inherits = "base16_default_dark"
+
+"ui.background" = { bg = "canvas" }
+"ui.text" = "text"
+"ui.text.focus" = "text"
+"ui.text.info" = "text"
+"ui.gutter" = { bg = "canvas" }
+"ui.linenr" = { fg = "muted", bg = "canvas" }
+"ui.linenr.selected" = { fg = "text", bg = "canvas" }
+"ui.cursorline.primary" = { bg = "surface" }
+"ui.virtual.whitespace" = "edge"
+"ui.virtual.indent-guide" = "edge"
+"ui.virtual.wrap" = "muted"
+"ui.virtual.ruler" = { bg = "edge" }
+"ui.statusline" = { fg = "muted", bg = "canvas" }
+"ui.statusline.inactive" = { fg = "muted", bg = "canvas" }
+"ui.statusline.normal" = { fg = "accent", bg = "canvas" }
+"ui.statusline.insert" = { fg = "green", bg = "canvas" }
+"ui.statusline.select" = { fg = "yellow", bg = "canvas" }
+"ui.menu" = { fg = "text", bg = "panel" }
+"ui.menu.selected" = { fg = "text", bg = "surface" }
+"ui.popup" = { fg = "text", bg = "panel" }
+"ui.popup.info" = { fg = "text", bg = "panel" }
+"ui.help" = { fg = "text", bg = "panel" }
+"ui.window" = "edge"
+"ui.background.separator" = "edge"
+"ui.selection" = { bg = "selection" }
+"ui.selection.primary" = { bg = "selection" }
+"ui.cursor" = { fg = "canvas", bg = "muted" }
+"ui.cursor.primary" = { fg = "canvas", bg = "accent" }
+"ui.cursor.match" = { fg = "accent", modifiers = ["underlined"] }
+"ui.highlight" = { bg = "surface" }
+"ui.highlight.frameline" = { bg = "surface" }
+
+[palette]
+canvas = "#0c0c0d"
+panel = "#101011"
+surface = "#252527"
+edge = "#303034"
+selection = "#34304e"
+text = "#dedee3"
+muted = "#75757e"
+accent = "#a5a0f7"
+green = "#a4c69f"
+yellow = "#d8bc8d"
+base03 = "#75757e"
+base05 = "#dedee3"
+base08 = "#d49a9a"
+base09 = "#d9b38c"
+base0A = "#d8bc8d"
+base0B = "#a4c69f"
+base0C = "#98c4c0"
+base0D = "#b0b9e5"
+base0E = "#b4a3d9"

@@ -1,0 +1,114 @@
+# Zeron's dark diff-viewer palette.
+# Colors: zeron/crates/theme/src/builtins.rs (zeron_dark and syntax).
+# Diff washes: zeron/crates/ui/src/changes.rs (5.5% over #060606).
+# Transparent UI colors are precomposited because Helix themes use opaque RGB.
+inherits = "helix_gpui"
+
+"attribute" = "cyan"
+"type" = "purple"
+"type.builtin" = "purple"
+"constructor" = "purple"
+"constant" = "yellow"
+"constant.builtin" = "yellow"
+"constant.builtin.boolean" = "yellow"
+"constant.numeric" = "yellow"
+"constant.character" = "emerald"
+"constant.character.escape" = "cyan"
+"string" = "emerald"
+"string.regexp" = "cyan"
+"string.special" = "cyan"
+"comment" = "comment"
+"variable" = "text"
+"variable.builtin" = "violet"
+"variable.parameter" = "text"
+"variable.other.member" = "pink"
+"label" = "blue"
+"punctuation" = "punctuation"
+"punctuation.delimiter" = "punctuation"
+"punctuation.bracket" = "punctuation"
+"punctuation.special" = "punctuation"
+"keyword" = "violet"
+"operator" = "violet"
+"function" = "blue"
+"function.builtin" = "blue"
+"function.macro" = "violet"
+"function.special" = "blue"
+"tag" = "pink"
+"namespace" = "text"
+"special" = "cyan"
+
+"markup.heading" = { fg = "violet", modifiers = ["bold"] }
+"markup.list" = "pink"
+"markup.bold" = { fg = "violet", modifiers = ["bold"] }
+"markup.italic" = { fg = "pink", modifiers = ["italic"] }
+"markup.strikethrough" = { modifiers = ["crossed_out"] }
+"markup.link.url" = { fg = "pink", modifiers = ["underlined"] }
+"markup.link.text" = "blue"
+"markup.link.label" = "yellow"
+"markup.quote" = "muted"
+"markup.raw" = "emerald"
+
+"diff.plus" = { fg = "emerald", bg = "addition" }
+"diff.minus" = { fg = "red", bg = "deletion" }
+"diff.delta" = { fg = "yellow", bg = "hunk" }
+"diff.delta.moved" = "violet"
+
+"ui.background" = { fg = "text", bg = "canvas" }
+"ui.linenr" = { fg = "gutter", bg = "canvas" }
+"ui.cursorline.primary" = { bg = "card" }
+"ui.bufferline" = { fg = "muted", bg = "shell" }
+"ui.bufferline.active" = { fg = "text", bg = "surface" }
+"ui.bufferline.background" = { bg = "shell" }
+"ui.menu.scroll" = { fg = "muted", bg = "panel" }
+"ui.picker.header" = { fg = "faint", modifiers = ["bold"] }
+"ui.picker.header.column" = "muted"
+"ui.picker.header.column.active" = "violet"
+"ui.text.directory" = "blue"
+"ui.text.inactive" = "faint"
+"ui.text.focus" = { fg = "violet", modifiers = ["bold"] }
+"ui.virtual.jump-label" = { fg = "yellow", modifiers = ["bold"] }
+"ui.virtual.inlay-hint" = { fg = "faint", bg = "card" }
+"ui.virtual.inlay-hint.parameter" = { fg = "faint", bg = "card" }
+"ui.virtual.inlay-hint.type" = { fg = "faint", bg = "card" }
+"ui.highlight" = { bg = "hunk" }
+"ui.highlight.frameline" = { bg = "addition" }
+
+"error" = "red"
+"warning" = "yellow"
+"info" = "blue"
+"hint" = "muted"
+"debug" = "violet"
+"diagnostic.error" = { underline = { color = "red", style = "curl" } }
+"diagnostic.warning" = { underline = { color = "yellow", style = "curl" } }
+"diagnostic.info" = { underline = { color = "blue", style = "curl" } }
+"diagnostic.hint" = { underline = { color = "muted", style = "curl" } }
+"diagnostic.unnecessary" = { modifiers = ["dim"] }
+"diagnostic.deprecated" = { modifiers = ["crossed_out"] }
+
+[palette]
+canvas = "#060606"
+shell = "#0d0d0d"
+card = "#0e0e0e"
+panel = "#151516"
+surface = "#343438"
+edge = "#1f1f1f"
+selection = "#352f5a"
+text = "#e8e8ea"
+muted = "#a9a9ae"
+faint = "#85858a"
+gutter = "#6c6c70"
+comment = "#92929a"
+punctuation = "#a1a1aa"
+accent = "#8b7cf6"
+violet = "#8b7cf6"
+purple = "#c084fc"
+blue = "#60a5fa"
+pink = "#f472b6"
+cyan = "#22d3ee"
+emerald = "#34d399"
+green = "#34d399"
+yellow = "#facc15"
+red = "#f87171"
+addition = "#09110e"
+deletion = "#130c0c"
+hunk = "#110f19"

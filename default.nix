@@ -33,7 +33,7 @@
   runtimeDir = runCommand "helix-runtime" {} ''
     mkdir -p $out
     ln -s ${./runtime}/* $out
-    rm -r $out/grammars
+    rm -f $out/grammars
     ln -s ${grammars} $out/grammars
   '';
 in
@@ -46,14 +46,15 @@ in
       allowBuiltinFetchGit = true;
     };
 
-    propagatedBuildInputs = [ runtimeDir ];
-    
+    propagatedBuildInputs = [runtimeDir];
+
     nativeBuildInputs = [
       installShellFiles
       git
     ];
 
     buildType = "release";
+    cargoBuildFlags = ["-p" "helix-term"];
 
     name = with builtins; (fromTOML (readFile ./helix-term/Cargo.toml)).package.name;
     src = fs.toSource {

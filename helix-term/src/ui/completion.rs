@@ -466,6 +466,124 @@ impl Component for Completion {
         self.popup.required_size(viewport)
     }
 
+    fn handle_ui_event(
+        &mut self,
+        event: &crate::frontend::UiEvent,
+        cx: &mut Context,
+    ) -> EventResult {
+        self.popup.handle_ui_event(event, cx)
+    }
+
+    fn render_native(
+        &mut self,
+        area: Rect,
+        surface: &mut Surface,
+        cx: &mut Context,
+        widgets: &mut Vec<crate::frontend::Widget>,
+    ) {
+        self.popup.render_native(area, surface, cx, widgets);
+
+        // if we have a selection, render a markdown popup on top/below with info
+        let option = match self.popup.contents_mut().selection_mut() {
+            Some(option) => option,
+            None => return,
+        };
+        if let CompletionItem::Lsp(option) = option {
+            self.resolve_handler.ensure_item_resolved(cx.editor, option);
+        }
+        // need to render:
+        // option.detail
+        // ---
+        // option.documentation
+
+        let Some(coords) = cx.editor.cursor().0 else {
+            return;
+        };
+        let cursor_pos = coords.row as u16;
+        let doc = doc!(cx.editor);
+        let language = doc.language_name().unwrap_or("");
+
+        let markdowned = |lang: &str, detail: Option<&str>, doc: Option<&str>| {
+            let md = match (detail, doc) {
+                (Some(detail), Some(doc)) => format!("```{lang}\n{detail}\n```\n{doc}"),
+                (Some(detail), None) => format!("```{lang}\n{detail}\n```"),
+                (None, Some(doc)) => doc.to_string(),
+                (None, None) => String::new(),
+            };
+            Markdown::new(md, cx.editor.syn_loader.clone())
+        };
+
+        let mut markdown_doc = match option {
+            CompletionItem::Lsp(option) => match &option.item.documentation {
+                Some(lsp::Documentation::String(contents))
+                | Some(lsp::Documentation::MarkupContent(lsp::MarkupContent {
+                    kind: lsp::MarkupKind::PlainText,
+                    value: contents,
+                })) => {
+                    // TODO: convert to wrapped text
+                    markdowned(language, option.item.detail.as_deref(), Some(contents))
+                }
+                Some(lsp::Documentation::MarkupContent(lsp::MarkupContent {
+                    kind: lsp::MarkupKind::Markdown,
+                    value: contents,
+                })) => {
+                    // TODO: set language based on doc scope
+                    markdowned(language, option.item.detail.as_deref(), Some(contents))
+                }
+                None if option.item.detail.is_some() => {
+                    // TODO: set language based on doc scope
+                    markdowned(language, option.item.detail.as_deref(), None)
+                }
+                None => return,
+            },
+            CompletionItem::Other(option) => {
+                let Some(doc) = option.documentation.as_deref() else {
+                    return;
+                };
+                markdowned(language, None, Some(doc))
+            }
+        };
+
+        let popup_area = self.popup.area(area, cx.editor);
+        let doc_width_available = area.width.saturating_sub(popup_area.right());
+        let doc_area = if doc_width_available > 30 {
+            let mut doc_width = doc_width_available;
+            let mut doc_height = area.height.saturating_sub(popup_area.top());
+            let x = popup_area.right();
+            let y = popup_area.top();
+
+            if let Some((rel_width, rel_height)) =
+                markdown_doc.required_size((doc_width, doc_height))
+            {
+                doc_width = rel_width.min(doc_width);
+                doc_height = rel_height.min(doc_height);
+            }
+            Rect::new(x, y, doc_width, doc_height)
+        } else {
+            // Documentation should not cover the cursor or the completion popup
+            // Completion popup could be above or below the current line
+            let avail_height_above = cursor_pos.min(popup_area.top()).saturating_sub(1);
+            let avail_height_below = area
+                .height
+                .saturating_sub(cursor_pos.max(popup_area.bottom()) + 1 /* padding */);
+            let (y, avail_height) = if avail_height_below >= avail_height_above {
+                (
+                    area.height.saturating_sub(avail_height_below),
+                    avail_height_below,
+                )
+            } else {
+                (0, avail_height_above)
+            };
+            if avail_height <= 1 {
+                return;
+            }
+
+            Rect::new(0, y, area.width, avail_height.min(15))
+        };
+
+        markdown_doc.render_native(doc_area, surface, cx, widgets);
+    }
+
     fn render(&mut self, area: Rect, surface: &mut Surface, cx: &mut Context) {
         self.popup.render(area, surface, cx);
 

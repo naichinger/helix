@@ -43,6 +43,38 @@ impl<T: Item> Select<T> {
 }
 
 impl<T: Item> Component for Select<T> {
+    fn render_native(
+        &mut self,
+        area: Rect,
+        surface: &mut Surface,
+        cx: &mut Context,
+        widgets: &mut Vec<crate::frontend::Widget>,
+    ) {
+        let width = area.width.min(80);
+        let (_, message_height) =
+            super::text::required_size(&self.message.contents, width.saturating_sub(4).max(1));
+        let (_, menu_height) = self.options.required_size((width, area.height)).unwrap();
+        let height = (message_height + 2 + menu_height).min(area.height);
+        let panel = Rect::new(
+            area.x + area.width.saturating_sub(width) / 2,
+            area.y + area.height.saturating_sub(height) / 2,
+            width,
+            height,
+        );
+        self.message
+            .render_native(panel.with_height(message_height + 2), surface, cx, widgets);
+        self.options
+            .render_native(panel.clip_top(message_height + 2), surface, cx, widgets);
+    }
+
+    fn handle_ui_event(
+        &mut self,
+        event: &crate::frontend::UiEvent,
+        cx: &mut Context,
+    ) -> EventResult {
+        self.options.handle_ui_event(event, cx)
+    }
+
     fn handle_event(&mut self, event: &Event, cx: &mut Context) -> EventResult {
         self.options.handle_event(event, cx)
     }

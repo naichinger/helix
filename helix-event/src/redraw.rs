@@ -40,6 +40,12 @@ pub fn redraw_requested() -> impl Future<Output = ()> {
 /// to wait for async computations that should be included in the current frame.
 pub fn start_frame() {
     drop(RENDER_LOCK.write());
+    start_frame_without_wait();
+}
+
+/// Graphical frontends present input immediately and redraw when background
+/// decorations finish. They must not block their input loop on a diff worker.
+pub fn start_frame_without_wait() {
     // exhaust any leftover redraw notifications
     let notify = REDRAW_NOTIFY.notified();
     tokio::pin!(notify);

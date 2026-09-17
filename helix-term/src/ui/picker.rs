@@ -53,6 +53,7 @@ use helix_view::{
 };
 
 use self::handlers::{DynamicQueryChange, DynamicQueryHandler, PreviewHighlightHandler};
+use helix_core::unicode::width::UnicodeWidthStr;
 
 pub const ID: &str = "picker";
 
@@ -251,6 +252,7 @@ pub struct Picker<T: 'static + Send + Sync, D: 'static> {
     cursor: u32,
     list_area: Rect,
     list_offset: u32,
+    native_id: Option<crate::frontend::WidgetId>,
     prompt: Prompt,
     query: PickerQuery,
 
@@ -385,6 +387,7 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
             cursor: 0,
             list_area: Rect::default(),
             list_offset: 0,
+            native_id: None,
             prompt,
             query,
             truncate_start: true,
@@ -536,6 +539,7 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
     }
 
     fn handle_prompt_change(&mut self, is_paste: bool) {
+        self.native_id = None;
         // TODO: better track how the pattern has changed
         let line = self.prompt.line();
         let old_query = self.query.parse(line);
@@ -680,6 +684,40 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
             PathOrId::Id(id) => {
                 let doc = editor.documents.get(&id).unwrap();
                 Some((Preview::EditorDocument(doc), range))
+            }
+        }
+    }
+
+    fn close(&mut self) -> EventResult {
+        // if the picker is very large don't store it as last_picker to avoid
+        // excessive memory consumption
+        let callback: compositor::Callback = if self.matcher.snapshot().item_count() > 1_000_000 {
+            Box::new(|compositor: &mut Compositor, _ctx| {
+                // remove the layer
+                compositor.pop();
+            })
+        } else {
+            // stop streaming in new items in the background, really we should
+            // be restarting the stream somehow once the picker gets
+            // reopened instead (like for an FS crawl) that would also remove the
+            // need for the special case above but that is pretty tricky
+            self.version.fetch_add(1, atomic::Ordering::Relaxed);
+            Box::new(|compositor: &mut Compositor, _ctx| {
+                // remove the layer
+                compositor.last_picker = compositor.pop();
+            })
+        };
+        EventResult::Consumed(Some(callback))
+    }
+
+    fn save_query_history(&self, ctx: &mut Context) {
+        if let Some(register) = self.prompt.history_register() {
+            if let Err(error) = ctx
+                .editor
+                .registers
+                .push(register, self.primary_query().to_string())
+            {
+                ctx.editor.set_error(error.to_string());
             }
         }
     }
@@ -888,7 +926,13 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
         );
     }
 
-    fn render_preview(&mut self, area: Rect, surface: &mut Surface, cx: &mut Context) {
+    fn render_preview(
+        &mut self,
+        area: Rect,
+        surface: &mut Surface,
+        cx: &mut Context,
+        native: bool,
+    ) {
         // -- Render the frame:
         // clear area
         let background = cx.editor.theme.get("ui.background");
@@ -903,7 +947,9 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
         // 1 column gap on either side
         let margin = Margin::horizontal(1);
         let inner = inner.inner(margin);
-        BLOCK.render(area, surface);
+        if !native {
+            BLOCK.render(area, surface);
+        }
 
         if let Some((preview, range)) = self.get_preview(cx.editor) {
             let doc = match preview.document() {
@@ -1033,6 +1079,228 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
 }
 
 impl<I: 'static + Send + Sync, D: 'static + Send + Sync> Component for Picker<I, D> {
+    fn render_native(
+        &mut self,
+        area: Rect,
+        _surface: &mut Surface,
+        cx: &mut Context,
+        widgets: &mut Vec<crate::frontend::Widget>,
+    ) {
+        use crate::frontend::{PickerRow, RichText, TextRun, Widget, WidgetContent, WidgetId};
+        let area = area.inner(Margin {
+            horizontal: (area.width / 12).min(6),
+            vertical: (area.height / 8).min(4),
+        });
+        let preview =
+            self.show_preview && self.file_fn.is_some() && area.width > MIN_AREA_WIDTH_FOR_PREVIEW;
+        let picker_area = area.with_width(if preview { area.width / 2 } else { area.width });
+        let status = self.matcher.tick(2);
+        let snapshot = self.matcher.snapshot();
+        self.cursor = self
+            .cursor
+            .min(snapshot.matched_item_count().saturating_sub(1));
+        if status.changed {
+            self.native_id = None;
+        }
+        let id = *self.native_id.get_or_insert_with(WidgetId::new);
+        let rows = picker_area
+            .height
+            .saturating_sub(4 + self.header_height())
+            .max(1) as u32;
+        self.completion_height = rows as u16;
+        let offset = self.cursor / rows * rows;
+        let end = (offset + rows).min(snapshot.matched_item_count());
+        let highlight = cx.editor.theme.get("special").add_modifier(Modifier::BOLD);
+        let mut matcher = MATCHER.lock();
+        matcher.config = Config::DEFAULT;
+        if self.file_fn.is_some() {
+            matcher.config.set_match_paths();
+        }
+        let mut widths = vec![1; self.columns.iter().filter(|column| !column.hidden).count()];
+        let mut indices = Vec::new();
+        let rows = snapshot
+            .matched_items(offset..end)
+            .enumerate()
+            .map(|(index, item)| {
+                let mut matcher_index = 0;
+                let mut visible_index = 0;
+                let mut columns = Vec::new();
+                for column in self.columns.iter() {
+                    // Hidden filter columns still occupy a matcher column.
+                    let pattern_index = matcher_index;
+                    matcher_index += usize::from(column.filter);
+                    if column.hidden {
+                        continue;
+                    }
+                    let cell = column.format(item.data, &self.editor_data);
+                    let mut text = RichText::from_text(&cell.content);
+                    if column.filter {
+                        indices.clear();
+                        snapshot.pattern().column_pattern(pattern_index).indices(
+                            item.matcher_columns[pattern_index].slice(..),
+                            &mut matcher,
+                            &mut indices,
+                        );
+                        indices.sort_unstable();
+                        indices.dedup();
+                        let mut grapheme_index = 0u32;
+                        let mut runs: Vec<TextRun> = Vec::new();
+                        for run in text.0 {
+                            for grapheme in run.text.graphemes(true) {
+                                let style = if indices.binary_search(&grapheme_index).is_ok() {
+                                    run.style.patch(highlight)
+                                } else {
+                                    run.style
+                                };
+                                if let Some(last) =
+                                    runs.last_mut().filter(|last| last.style == style)
+                                {
+                                    last.text.push_str(grapheme);
+                                } else {
+                                    runs.push(TextRun {
+                                        text: grapheme.into(),
+                                        style,
+                                    });
+                                }
+                                grapheme_index += 1;
+                            }
+                        }
+                        text = RichText(runs);
+                    }
+                    widths[visible_index] = widths[visible_index].max(cell.content.width());
+                    visible_index += 1;
+                    columns.push(text);
+                }
+                PickerRow {
+                    index: offset + index as u32,
+                    columns,
+                }
+            })
+            .collect();
+        let active_column = self.query.active_column(self.prompt.position());
+        let headers: Vec<RichText> = if self.columns.len() > 1 {
+            self.columns
+                .iter()
+                .filter(|column| !column.hidden)
+                .map(|column| {
+                    let style = if active_column.is_some_and(|name| Arc::ptr_eq(name, &column.name))
+                    {
+                        cx.editor.theme.get("ui.picker.header.column.active")
+                    } else {
+                        cx.editor.theme.get("ui.picker.header.column")
+                    };
+                    RichText::plain(column.name.to_string(), style)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for (width, header) in widths.iter_mut().zip(&headers) {
+            *width = (*width).max(header.0.iter().map(|run| run.text.width()).sum());
+        }
+        let picker = crate::frontend::Picker {
+            id,
+            prompt: self.prompt.native_snapshot(cx.editor),
+            headers,
+            widths,
+            rows,
+            selected: self.cursor,
+            matched: snapshot.matched_item_count(),
+            total: snapshot.item_count(),
+            running: status.running || self.matcher.active_injectors() > 0,
+        };
+        drop(matcher);
+        widgets.push(Widget {
+            scroll: 0,
+            area: picker_area,
+            style: cx
+                .editor
+                .theme
+                .get("ui.background")
+                .patch(cx.editor.theme.get("ui.text")),
+            selected_style: cx
+                .editor
+                .theme
+                .get("ui.selection")
+                .patch(cx.editor.theme.get("ui.text.focus")),
+            border_style: cx.editor.theme.get("ui.background.separator"),
+            content: WidgetContent::Picker(picker),
+        });
+        // Only document previews use the buffer renderer; other preview content
+        // is ordinary native text.
+        if preview {
+            let area = area.clip_left(picker_area.width);
+            let placeholder = self.get_preview(cx.editor).and_then(|(preview, range)| {
+                if preview.document().is_some_and(|doc| {
+                    range.is_none_or(|(start, end)| start <= end && end <= doc.text().len_lines())
+                }) {
+                    None
+                } else if let Some(entries) = preview.dir_content() {
+                    Some(
+                        entries
+                            .iter()
+                            .map(|(path, dir)| format!("{}{}", path, if *dir { "/" } else { "" }))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    )
+                } else {
+                    Some(preview.placeholder().to_string())
+                }
+            });
+            if let Some(text) = placeholder {
+                widgets.push(Widget::new(
+                    area,
+                    cx.editor.theme.get("ui.popup"),
+                    WidgetContent::Text {
+                        title: "Preview".into(),
+                        text: RichText::plain(text, cx.editor.theme.get("ui.text")),
+                    },
+                ));
+            } else {
+                let mut preview_buffer = Surface::empty(area);
+                self.render_preview(area, &mut preview_buffer, cx, true);
+                widgets.push(Widget::new(
+                    area,
+                    cx.editor.theme.get("ui.window"),
+                    WidgetContent::Buffer(Arc::new(preview_buffer)),
+                ));
+            }
+        }
+    }
+
+    fn handle_ui_event(
+        &mut self,
+        event: &crate::frontend::UiEvent,
+        ctx: &mut Context,
+    ) -> EventResult {
+        if matches!(event, crate::frontend::UiEvent::PromptCursor { .. }) {
+            return self.prompt.handle_ui_event(event, ctx);
+        }
+        if let crate::frontend::UiEvent::ScrollPicker { id, lines } = *event {
+            if self.native_id == Some(id) {
+                self.move_by(
+                    lines.unsigned_abs(),
+                    if lines < 0 {
+                        Direction::Backward
+                    } else {
+                        Direction::Forward
+                    },
+                );
+            }
+        }
+        if let crate::frontend::UiEvent::ActivatePicker { id, index } = *event {
+            if self.native_id == Some(id) && index < self.matcher.snapshot().matched_item_count() {
+                self.cursor = index;
+                if let Some(option) = self.selection() {
+                    (self.callback_fn)(ctx, option, self.default_action);
+                }
+                self.save_query_history(ctx);
+                return self.close();
+            }
+        }
+        EventResult::Consumed(None)
+    }
+
     fn render(&mut self, area: Rect, surface: &mut Surface, cx: &mut Context) {
         // +---------+ +---------+
         // |prompt   | |preview  |
@@ -1055,7 +1323,7 @@ impl<I: 'static + Send + Sync, D: 'static + Send + Sync> Component for Picker<I,
 
         if render_preview {
             let preview_area = area.clip_left(picker_width);
-            self.render_preview(preview_area, surface, cx);
+            self.render_preview(preview_area, surface, cx, false);
         }
     }
 
@@ -1090,29 +1358,6 @@ impl<I: 'static + Send + Sync, D: 'static + Send + Sync> Component for Picker<I,
             _ => return EventResult::Ignored(None),
         };
 
-        let close_fn = |picker: &mut Self| {
-            // if the picker is very large don't store it as last_picker to avoid
-            // excessive memory consumption
-            let callback: compositor::Callback =
-                if picker.matcher.snapshot().item_count() > 1_000_000 {
-                    Box::new(|compositor: &mut Compositor, _ctx| {
-                        // remove the layer
-                        compositor.pop();
-                    })
-                } else {
-                    // stop streaming in new items in the background, really we should
-                    // be restarting the stream somehow once the picker gets
-                    // reopened instead (like for an FS crawl) that would also remove the
-                    // need for the special case above but that is pretty tricky
-                    picker.version.fetch_add(1, atomic::Ordering::Relaxed);
-                    Box::new(|compositor: &mut Compositor, _ctx| {
-                        // remove the layer
-                        compositor.last_picker = compositor.pop();
-                    })
-                };
-            EventResult::Consumed(Some(callback))
-        };
-
         match key_event {
             shift!(Tab) | key!(Up) | ctrl!('p') => {
                 self.move_by(1, Direction::Backward);
@@ -1132,7 +1377,7 @@ impl<I: 'static + Send + Sync, D: 'static + Send + Sync> Component for Picker<I,
             key!(End) => {
                 self.to_end();
             }
-            key!(Esc) | ctrl!('c') => return close_fn(self),
+            key!(Esc) | ctrl!('c') => return self.close(),
             alt!(Enter) => {
                 if let Some(option) = self.selection() {
                     (self.callback_fn)(ctx, option, self.default_action);
@@ -1161,29 +1406,21 @@ impl<I: 'static + Send + Sync, D: 'static + Send + Sync> Component for Picker<I,
                     if let Some(option) = self.selection() {
                         (self.callback_fn)(ctx, option, self.default_action);
                     }
-                    if let Some(history_register) = self.prompt.history_register() {
-                        if let Err(err) = ctx
-                            .editor
-                            .registers
-                            .push(history_register, self.primary_query().to_string())
-                        {
-                            ctx.editor.set_error(err.to_string());
-                        }
-                    }
-                    return close_fn(self);
+                    self.save_query_history(ctx);
+                    return self.close();
                 }
             }
             ctrl!('s') => {
                 if let Some(option) = self.selection() {
                     (self.callback_fn)(ctx, option, Action::HorizontalSplit);
                 }
-                return close_fn(self);
+                return self.close();
             }
             ctrl!('v') => {
                 if let Some(option) = self.selection() {
                     (self.callback_fn)(ctx, option, Action::VerticalSplit);
                 }
-                return close_fn(self);
+                return self.close();
             }
             ctrl!('t') => {
                 self.toggle_preview();

@@ -68,6 +68,53 @@ impl SignatureHelp {
 }
 
 impl Component for SignatureHelp {
+    fn render_native(
+        &mut self,
+        area: Rect,
+        _surface: &mut Buffer,
+        cx: &mut Context,
+        widgets: &mut Vec<crate::frontend::Widget>,
+    ) {
+        let Some(signature) = self
+            .signatures
+            .get(self.active_signature)
+            .or(self.signatures.first())
+        else {
+            return;
+        };
+        let highlight = signature.active_param_range.and_then(|(start, end)| {
+            cx.editor
+                .theme
+                .find_highlight_exact("ui.selection")
+                .map(|highlight| OverlayHighlights::single(highlight, start..end))
+        });
+        let text = crate::ui::markdown::highlighted_code_block(
+            &signature.signature,
+            &self.language,
+            Some(&cx.editor.theme),
+            &self.config_loader.load(),
+            highlight,
+        );
+        let mut blocks = vec![crate::frontend::TextBlock {
+            kind: crate::frontend::BlockKind::Code,
+            text: crate::frontend::RichText::from_text(&text),
+            links: Vec::new(),
+        }];
+        if let Some(doc) = &signature.signature_doc {
+            blocks.extend(
+                Markdown::new(doc.clone(), self.config_loader.clone())
+                    .native_blocks(&cx.editor.theme),
+            );
+        }
+        widgets.push(crate::frontend::Widget::new(
+            area,
+            cx.editor.theme.get("ui.popup"),
+            crate::frontend::WidgetContent::Document {
+                title: format!("Signature {}", self.signature_index()),
+                blocks,
+            },
+        ));
+    }
     fn handle_event(&mut self, event: &Event, _cx: &mut Context) -> EventResult {
         let Event::Key(event) = event else {
             return EventResult::Ignored(None);

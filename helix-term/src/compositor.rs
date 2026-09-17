@@ -52,6 +52,24 @@ pub trait Component: Any + AnyComponent {
     /// Render the component onto the provided surface.
     fn render(&mut self, area: Rect, frame: &mut Surface, ctx: &mut Context);
 
+    /// Render semantic graphical controls. Every component must implement this;
+    /// there is deliberately no fallback to terminal UI rasterization.
+    fn render_native(
+        &mut self,
+        area: Rect,
+        frame: &mut Surface,
+        ctx: &mut Context,
+        widgets: &mut Vec<crate::frontend::Widget>,
+    );
+
+    fn handle_ui_event(
+        &mut self,
+        _event: &crate::frontend::UiEvent,
+        _ctx: &mut Context,
+    ) -> EventResult {
+        EventResult::Ignored(None)
+    }
+
     /// Get cursor position and cursor kind.
     fn cursor(&self, _area: Rect, _ctx: &Editor) -> (Option<Position>, CursorKind) {
         (None, CursorKind::Hidden)
@@ -184,6 +202,36 @@ impl Compositor {
     pub fn render(&mut self, area: Rect, surface: &mut Surface, cx: &mut Context) {
         for layer in &mut self.layers {
             layer.render(area, surface, cx);
+        }
+    }
+
+    pub fn render_native(
+        &mut self,
+        area: Rect,
+        surface: &mut Surface,
+        cx: &mut Context,
+    ) -> Vec<crate::frontend::Widget> {
+        let mut widgets = Vec::new();
+        for layer in &mut self.layers {
+            layer.render_native(area, surface, cx, &mut widgets);
+        }
+        widgets
+    }
+
+    pub fn handle_ui_event(&mut self, event: &crate::frontend::UiEvent, cx: &mut Context) {
+        let mut callbacks = Vec::new();
+        for layer in self.layers.iter_mut().rev() {
+            let (consumed, callback) = match layer.handle_ui_event(event, cx) {
+                EventResult::Consumed(callback) => (true, callback),
+                EventResult::Ignored(callback) => (false, callback),
+            };
+            callbacks.extend(callback);
+            if consumed {
+                break;
+            }
+        }
+        for callback in callbacks {
+            callback(self, cx);
         }
     }
 

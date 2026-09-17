@@ -5,6 +5,8 @@ use std::{borrow::Cow, fmt::Write};
 #[derive(Debug)]
 /// Info box used in editor. Rendering logic will be in other crate.
 pub struct Info {
+    /// Unpadded key/description pairs for graphical controls.
+    pub entries: Vec<(String, String)>,
     /// Title shown at top.
     pub title: Cow<'static, str>,
     /// Text body, should contain newlines.
@@ -25,6 +27,7 @@ impl Info {
         let title = title.into();
         if body.is_empty() {
             return Self {
+                entries: Vec::new(),
                 height: 1,
                 width: title.len() as u16,
                 text: "".to_string(),
@@ -50,6 +53,12 @@ impl Info {
         }
 
         Self {
+            entries: body
+                .iter()
+                .map(|(key, description)| {
+                    (key.as_ref().to_owned(), description.as_ref().to_owned())
+                })
+                .collect(),
             title,
             width: text.lines().map(|l| l.width()).max().unwrap() as u16,
             height: body.len() as u16,

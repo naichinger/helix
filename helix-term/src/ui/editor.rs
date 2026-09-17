@@ -82,6 +82,7 @@ impl EditorView {
         viewport: Rect,
         surface: &mut Surface,
         is_focused: bool,
+        native: bool,
     ) {
         let inner = view.inner_area(doc);
         let area = view.area;
@@ -216,6 +217,10 @@ impl EditorView {
             theme,
             decorations,
         );
+
+        if native {
+            return;
+        }
 
         // if we're not at the edge of the screen, draw a right border
         if viewport.right() != view.area.right() {
@@ -1467,6 +1472,221 @@ impl EditorView {
 }
 
 impl Component for EditorView {
+    fn render_native(
+        &mut self,
+        area: Rect,
+        surface: &mut Surface,
+        cx: &mut Context,
+        widgets: &mut Vec<crate::frontend::Widget>,
+    ) {
+        use crate::frontend::{RichText, Tab, Widget, WidgetContent};
+        surface.set_style(area, cx.editor.theme.get("ui.background"));
+        cx.editor.resize(area.clip_top(2.min(area.height)));
+        let active = view!(cx.editor).doc;
+        let tabs = cx
+            .editor
+            .documents()
+            .map(|doc| Tab {
+                id: doc.id(),
+                label: doc
+                    .path()
+                    .and_then(|path| path.file_name())
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "Untitled".into()),
+                path: doc
+                    .path()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default(),
+                modified: doc.is_modified(),
+                active: doc.id() == active,
+            })
+            .collect();
+        widgets.push(Widget::new(
+            area.with_height(2),
+            cx.editor.theme.get("ui.statusline"),
+            WidgetContent::Tabs(tabs),
+        ));
+        let mut focused_status = None;
+        for (view, focused) in cx.editor.tree.views() {
+            let doc = cx.editor.document(view.doc).unwrap();
+            self.render_view(cx.editor, doc, view, area, surface, focused, true);
+            let status_area = Rect::new(
+                view.area.x,
+                view.area.bottom().saturating_sub(1),
+                view.area.width,
+                1,
+            );
+            let mut context =
+                statusline::RenderContext::new(cx.editor, doc, view, focused, &self.spinners);
+            if focused {
+                focused_status = Some(widgets.len());
+            }
+            widgets.push(statusline::native(&mut context, status_area));
+            let config = doc.config.load();
+            if focused
+                && config.inline_diagnostics.disabled()
+                && config.end_of_line_diagnostics == DiagnosticFilter::Disable
+            {
+                let cursor = doc
+                    .selection(view.id)
+                    .primary()
+                    .cursor(doc.text().slice(..));
+                let text = doc
+                    .diagnostics()
+                    .iter()
+                    .filter(|d| d.range.start <= cursor && d.range.end >= cursor)
+                    .map(|d| d.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !text.is_empty() {
+                    let inner = view.inner_area(doc);
+                    let width = inner.width.min(80);
+                    widgets.push(Widget::new(
+                        Rect::new(
+                            inner.right().saturating_sub(width),
+                            inner.y + 1,
+                            width,
+                            inner.height.saturating_sub(1).min(8),
+                        ),
+                        cx.editor.theme.get("ui.popup"),
+                        WidgetContent::Text {
+                            title: "Diagnostics".into(),
+                            text: RichText::plain(text, cx.editor.theme.get("diagnostic")),
+                        },
+                    ));
+                }
+            }
+        }
+        for divider in cx.editor.tree.dividers() {
+            widgets.push(Widget::new(
+                divider.area,
+                cx.editor.theme.get("ui.window"),
+                WidgetContent::Divider(divider),
+            ));
+        }
+        let style = cx.editor.theme.get("ui.statusline");
+        let mut state = String::new();
+        if let Some(count) = cx.editor.count {
+            state.push_str(&count.to_string());
+        }
+        for key in self.keymaps.pending().iter().chain(&self.pseudo_pending) {
+            state.push_str(&key.key_sequence_format());
+        }
+        if let Some((register, _)) = cx.editor.macro_recording {
+            state.push_str(&format!("  Recording @{register}"));
+        }
+        if workspace_trust_indicator_visible(cx.editor) {
+            state.push_str("  Restricted workspace");
+        }
+        let message = cx
+            .editor
+            .status_msg
+            .as_ref()
+            .map(|(msg, _)| msg.to_string())
+            .unwrap_or_default();
+        // Native prompts float above the buffer. Keep messages and pending keys
+        // in the focused pane's status bar instead of reserving a command row.
+        if let Some(index) = focused_status {
+            if let WidgetContent::Status { center, right, .. } = &mut widgets[index].content {
+                if !message.is_empty() {
+                    *center = RichText::plain(message, style);
+                }
+                if !state.is_empty() {
+                    right
+                        .0
+                        .extend(RichText::plain(format!("  {state}"), style).0);
+                }
+            }
+        }
+        if cx.editor.config().auto_info {
+            if let Some(mut info) = cx.editor.autoinfo.take() {
+                info.render_native(area, surface, cx, widgets);
+                cx.editor.autoinfo = Some(info);
+            }
+        }
+        if let Some(completion) = self.completion.as_mut() {
+            completion.render_native(area, surface, cx, widgets);
+        }
+    }
+
+    fn handle_ui_event(
+        &mut self,
+        event: &crate::frontend::UiEvent,
+        cx: &mut Context,
+    ) -> EventResult {
+        use crate::frontend::UiEvent;
+        let callback = if matches!(
+            event,
+            UiEvent::ActivateTab(_) | UiEvent::CloseTab(_) | UiEvent::ResizeSplit { .. }
+        ) {
+            let mut context = commands::Context {
+                editor: cx.editor,
+                jobs: cx.jobs,
+                register: None,
+                count: None,
+                callback: Vec::new(),
+                on_next_key_callback: None,
+            };
+            self.handle_non_key_input(&mut context);
+            let callbacks = std::mem::take(&mut context.callback);
+            (!callbacks.is_empty()).then(|| {
+                Box::new(
+                    move |compositor: &mut crate::compositor::Compositor, context: &mut Context| {
+                        for callback in callbacks {
+                            callback(compositor, context);
+                        }
+                    },
+                ) as crate::compositor::Callback
+            })
+        } else {
+            None
+        };
+        match *event {
+            UiEvent::ActivateTab(id) => {
+                if cx.editor.document(id).is_some() {
+                    cx.editor.switch(id, helix_view::editor::Action::Replace);
+                }
+                return EventResult::Consumed(callback);
+            }
+            UiEvent::CloseTab(id) => {
+                if cx.editor.document(id).is_some() {
+                    if let Err(error) = cx.editor.close_document(id, false) {
+                        cx.editor.set_error(match error {
+                            helix_view::editor::CloseError::BufferModified(name) => {
+                                format!("{name} has unsaved changes. Save it before closing.")
+                            }
+                            helix_view::editor::CloseError::SaveError(error) => error.to_string(),
+                            helix_view::editor::CloseError::DoesNotExist => {
+                                "Buffer no longer exists".into()
+                            }
+                        });
+                    }
+                }
+                return EventResult::Consumed(callback);
+            }
+            UiEvent::ResizeSplit {
+                parent,
+                index,
+                position,
+            } => {
+                cx.editor.tree.resize_divider(parent, index, position);
+                return EventResult::Consumed(callback);
+            }
+            _ => (),
+        }
+        if let Some(completion) = &mut self.completion {
+            if let EventResult::Consumed(callback) = completion.handle_ui_event(event, cx) {
+                if callback.is_some() {
+                    if let Some(callback) = self.clear_completion(cx.editor) {
+                        self.on_next_key = Some((callback, OnKeyCallbackKind::Fallback));
+                    }
+                }
+                return EventResult::Consumed(None);
+            }
+        }
+        EventResult::Ignored(None)
+    }
+
     fn handle_event(
         &mut self,
         event: &Event,
@@ -1690,7 +1910,7 @@ impl Component for EditorView {
 
         for (view, is_focused) in cx.editor.tree.views() {
             let doc = cx.editor.document(view.doc).unwrap();
-            self.render_view(cx.editor, doc, view, area, surface, is_focused);
+            self.render_view(cx.editor, doc, view, area, surface, is_focused, false);
         }
 
         if config.auto_info {

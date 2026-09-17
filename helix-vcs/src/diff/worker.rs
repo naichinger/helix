@@ -77,6 +77,7 @@ impl DiffWorker {
         diff.hunks.extend(self.diff_alloc.hunks());
         drop(diff);
         self.diff_finished_notify.notify_waiters();
+        helix_event::request_redraw();
     }
 
     fn perform_diff(&mut self, input: &InternedInput<RopeSlice>) {

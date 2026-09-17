@@ -49,6 +49,7 @@ pub fn color(value: Color, fallback: u32) -> Hsla {
 
 pub struct BufferElement {
     pub view: Entity<EditorView>,
+    pub preview: Option<std::sync::Arc<tui::buffer::Buffer>>,
 }
 impl IntoElement for BufferElement {
     type Element = Self;
@@ -86,8 +87,10 @@ impl Element for BufferElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        self.view
-            .update(cx, |view, cx| view.layout(bounds, window, cx));
+        if self.preview.is_none() {
+            self.view
+                .update(cx, |view, cx| view.layout(bounds, window, cx));
+        }
     }
     fn paint(
         &mut self,
@@ -100,24 +103,36 @@ impl Element for BufferElement {
         cx: &mut App,
     ) {
         let view = self.view.read(cx);
+        if view.trace_latency {
+            if let Some(input_at) = view.frame.input_at {
+                if view.last_presented_input.replace(Some(input_at)) != Some(input_at) {
+                    log::info!(
+                        "GPUI input_to_paint_ms={:.2}",
+                        input_at.elapsed().as_secs_f64() * 1000.
+                    );
+                }
+            }
+        }
         let frame = view.frame.clone();
+        let buffer = self.preview.as_deref().unwrap_or(&frame.buffer);
         let focus = view.focus.clone();
         let cell_width = view.cell_width;
         let line_height = view.line_height;
         let font_size = view.font_size;
         let base_font = view.font.clone();
         let preedit = view.preedit.clone();
-        window.handle_input(
-            &focus,
-            ElementInputHandler::new(bounds, self.view.clone()),
-            cx,
-        );
+        if self.preview.is_none() {
+            window.handle_input(
+                &focus,
+                ElementInputHandler::new(bounds, self.view.clone()),
+                cx,
+            );
+        }
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             window.paint_quad(fill(bounds, color(frame.background, 0x1b1d27)));
-            for (y, row) in frame
-                .buffer
+            for (y, row) in buffer
                 .content
-                .chunks(frame.buffer.area.width.max(1) as usize)
+                .chunks(buffer.area.width.max(1) as usize)
                 .enumerate()
             {
                 if line_height * y as f32 >= bounds.size.height {
@@ -182,7 +197,9 @@ impl Element for BufferElement {
                             },
                         ),
                     };
-                    if !cell.modifier.contains(Modifier::HIDDEN) {
+                    if !cell.modifier.contains(Modifier::HIDDEN)
+                        && !text.chars().all(|ch| ch == ' ')
+                    {
                         let line = window.text_system().shape_line(
                             text.into(),
                             font_size,
@@ -194,6 +211,9 @@ impl Element for BufferElement {
                         }
                     }
                 }
+            }
+            if self.preview.is_some() {
+                return;
             }
             let origin = bounds.origin
                 + point(
@@ -211,7 +231,7 @@ impl Element for BufferElement {
             if frame.cursor_kind != CursorKind::Hidden {
                 window.paint_quad(fill(cursor_bounds, rgba(0xe5e9f066)));
             }
-            if !preedit.is_empty() {
+            if !preedit.is_empty() && !frame.widgets.iter().any(|widget| widget.has_input()) {
                 let run = TextRun {
                     len: preedit.len(),
                     font: base_font.clone(),

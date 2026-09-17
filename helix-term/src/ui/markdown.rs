@@ -169,6 +169,143 @@ impl Markdown {
         }
     }
 
+    pub fn native_blocks(&self, theme: &Theme) -> Vec<crate::frontend::TextBlock> {
+        use crate::frontend::{BlockKind, RichText, TextBlock, TextRun};
+        fn flush(block: &mut TextBlock, blocks: &mut Vec<TextBlock>) {
+            if !block.text.0.is_empty() || matches!(block.kind, BlockKind::Rule) {
+                blocks.push(std::mem::take(block));
+            }
+        }
+        let mut blocks = Vec::new();
+        let mut block = TextBlock::default();
+        let mut styles = vec![theme.get("ui.text")];
+        let mut lists: Vec<Option<u64>> = Vec::new();
+        let mut link = None;
+        let mut code_language: Option<String> = None;
+        for event in Parser::new_ext(&self.contents, Options::ENABLE_STRIKETHROUGH) {
+            match event {
+                Event::Start(tag) => {
+                    let mut style = *styles.last().unwrap();
+                    match &tag {
+                        Tag::Heading { .. } => {
+                            flush(&mut block, &mut blocks);
+                            block.kind = BlockKind::Heading;
+                            style = style
+                                .patch(theme.get("markup.heading"))
+                                .add_modifier(Modifier::BOLD);
+                        }
+                        Tag::Paragraph => {
+                            flush(&mut block, &mut blocks);
+                        }
+                        Tag::CodeBlock(kind) => {
+                            flush(&mut block, &mut blocks);
+                            block.kind = BlockKind::Code;
+                            code_language = Some(match kind {
+                                CodeBlockKind::Fenced(language) => language.to_string(),
+                                CodeBlockKind::Indented => String::new(),
+                            });
+                        }
+                        Tag::BlockQuote(_) => {
+                            flush(&mut block, &mut blocks);
+                            block.kind = BlockKind::Quote;
+                        }
+                        Tag::List(number) => lists.push(*number),
+                        Tag::Item => {
+                            flush(&mut block, &mut blocks);
+                            let marker = match lists.last_mut() {
+                                Some(Some(number)) => {
+                                    let label = format!("{number}.");
+                                    *number += 1;
+                                    label
+                                }
+                                _ => "•".into(),
+                            };
+                            block.kind = BlockKind::Item(marker);
+                        }
+                        Tag::Strong => style = style.add_modifier(Modifier::BOLD),
+                        Tag::Emphasis => style = style.add_modifier(Modifier::ITALIC),
+                        Tag::Strikethrough => style = style.add_modifier(Modifier::CROSSED_OUT),
+                        Tag::Link { dest_url, .. } => {
+                            link = Some((
+                                block.text.0.iter().map(|run| run.text.len()).sum::<usize>(),
+                                dest_url.to_string(),
+                            ));
+                            style = style.patch(theme.get("markup.link.url"));
+                        }
+                        _ => (),
+                    }
+                    styles.push(style);
+                }
+                Event::End(tag) => {
+                    if styles.len() > 1 {
+                        styles.pop();
+                    }
+                    match tag {
+                        TagEnd::Link => {
+                            if let Some((start, url)) = link.take() {
+                                let end = block.text.0.iter().map(|run| run.text.len()).sum();
+                                block.links.push((start..end, url));
+                            }
+                        }
+                        TagEnd::List(_) => {
+                            lists.pop();
+                        }
+                        TagEnd::CodeBlock => {
+                            code_language = None;
+                            flush(&mut block, &mut blocks);
+                        }
+                        TagEnd::Paragraph
+                        | TagEnd::Heading(_)
+                        | TagEnd::Item
+                        | TagEnd::BlockQuote(_) => flush(&mut block, &mut blocks),
+                        _ => (),
+                    }
+                }
+                Event::Text(text) => {
+                    if let Some(language) = &code_language {
+                        block.text.0.extend(
+                            RichText::from_text(&highlighted_code_block(
+                                &text,
+                                language,
+                                Some(theme),
+                                &self.config_loader.load(),
+                                None,
+                            ))
+                            .0,
+                        );
+                    } else {
+                        block.text.0.push(TextRun {
+                            text: text.to_string(),
+                            style: *styles.last().unwrap(),
+                        });
+                    }
+                }
+                Event::Code(text) => block.text.0.push(TextRun {
+                    text: text.to_string(),
+                    style: theme.get("markup.raw.inline"),
+                }),
+                Event::SoftBreak => block.text.0.push(TextRun {
+                    text: " ".into(),
+                    style: *styles.last().unwrap(),
+                }),
+                Event::HardBreak => block.text.0.push(TextRun {
+                    text: "\n".into(),
+                    style: *styles.last().unwrap(),
+                }),
+                Event::Rule => {
+                    flush(&mut block, &mut blocks);
+                    blocks.push(TextBlock {
+                        kind: BlockKind::Rule,
+                        ..TextBlock::default()
+                    });
+                }
+                _ => (),
+            }
+        }
+        flush(&mut block, &mut blocks);
+        blocks
+    }
+
     pub fn parse(&self, theme: Option<&Theme>) -> tui::text::Text<'_> {
         fn push_line<'a>(spans: &mut Vec<Span<'a>>, lines: &mut Vec<Spans<'a>>) {
             let spans = std::mem::take(spans);
@@ -366,6 +503,22 @@ impl Markdown {
 }
 
 impl Component for Markdown {
+    fn render_native(
+        &mut self,
+        area: Rect,
+        _surface: &mut Surface,
+        cx: &mut Context,
+        widgets: &mut Vec<crate::frontend::Widget>,
+    ) {
+        widgets.push(crate::frontend::Widget::new(
+            area,
+            cx.editor.theme.get("ui.popup"),
+            crate::frontend::WidgetContent::Document {
+                title: String::new(),
+                blocks: self.native_blocks(&cx.editor.theme),
+            },
+        ));
+    }
     fn render(&mut self, area: Rect, surface: &mut Surface, cx: &mut Context) {
         use tui::widgets::{Paragraph, Widget, Wrap};
 

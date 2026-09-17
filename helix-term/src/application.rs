@@ -80,15 +80,21 @@ pub struct Application<B: Backend = TerminalBackend> {
 
     theme_mode: Option<theme::Mode>,
     read_stdin: bool,
+    frontend_renderer: Option<crate::frontend::Renderer>,
+    last_native_frame: Option<tokio::time::Instant>,
+    native_frame_due: Option<tokio::time::Instant>,
+    native_input_at: Option<std::time::Instant>,
 }
 
 /// Input from a terminal or an embedded graphical frontend.
 pub enum ApplicationEvent {
     Terminal(std::io::Result<TerminalEvent>),
     Input(Event),
+    TimedInput(Event, std::time::Instant),
     Command(crate::commands::MappableCommand),
     Open(std::path::PathBuf),
     Theme(theme::Mode),
+    Ui(crate::frontend::UiEvent),
 }
 
 #[cfg(feature = "integration")]
@@ -150,13 +156,17 @@ impl<B: Backend> Application<B> {
     /// Construct an application without assuming ownership of a terminal or stdin.
     pub fn new_with_backend(
         args: Args,
-        config: Config,
+        mut config: Config,
         lang_loader: syntax::Loader,
         workspace_trust: helix_loader::workspace_trust::WorkspaceTrust,
         backend: B,
         read_stdin: bool,
     ) -> Result<Self, Error> {
         use helix_view::editor::Action;
+
+        // Commands such as :theme also consult the editor configuration. Keep
+        // it consistent with the backend's actual color capabilities.
+        config.editor.true_color |= backend.supports_true_color();
 
         let mut theme_parent_dirs = vec![helix_loader::config_dir()];
         theme_parent_dirs.extend(helix_loader::runtime_dirs().iter().cloned());
@@ -301,12 +311,34 @@ impl<B: Backend> Application<B> {
             lsp_progress: LspProgressMap::new(),
             theme_mode,
             read_stdin,
+            frontend_renderer: None,
+            last_native_frame: None,
+            native_frame_due: None,
+            native_input_at: None,
         };
 
         Ok(app)
     }
 
+    pub fn set_frontend_renderer(&mut self, renderer: crate::frontend::Renderer) {
+        self.frontend_renderer = Some(renderer);
+    }
+
     async fn render(&mut self) {
+        if self.frontend_renderer.is_some() {
+            if let Some(last) = self.last_native_frame {
+                let due = last + std::time::Duration::from_millis(8);
+                if tokio::time::Instant::now() < due {
+                    self.native_frame_due = Some(due);
+                    return;
+                }
+            }
+        }
+        self.render_now().await;
+    }
+
+    async fn render_now(&mut self) {
+        self.native_frame_due = None;
         if self.compositor.full_redraw {
             self.terminal.clear().expect("Cannot clear the terminal");
             self.compositor.full_redraw = false;
@@ -318,7 +350,11 @@ impl<B: Backend> Application<B> {
             scroll: None,
         };
 
-        helix_event::start_frame();
+        if self.frontend_renderer.is_some() {
+            helix_event::start_frame_without_wait();
+        } else {
+            helix_event::start_frame();
+        }
         cx.editor.needs_redraw = false;
 
         let area = self
@@ -329,6 +365,23 @@ impl<B: Backend> Application<B> {
         // TODO: need to recalculate view tree if necessary
 
         let surface = self.terminal.current_buffer_mut();
+
+        if let Some(renderer) = &mut self.frontend_renderer {
+            surface.reset();
+            let widgets = self.compositor.render_native(area, surface, &mut cx);
+            let (cursor, cursor_kind) = self.compositor.cursor(area, cx.editor);
+            renderer(crate::frontend::Frame {
+                buffer: surface,
+                widgets,
+                cursor,
+                cursor_kind,
+                background: cx.editor.theme.get("ui.background"),
+                input_at: self.native_input_at.take(),
+            });
+            cx.editor.cursor_cache.reset();
+            self.last_native_frame = Some(tokio::time::Instant::now());
+            return;
+        }
 
         self.compositor.render(area, surface, &mut cx);
         let (pos, kind) = self.compositor.cursor(area, &self.editor);
@@ -368,6 +421,9 @@ impl<B: Backend> Application<B> {
     {
         self.render().await;
         while self.event_loop_inner(input_stream).await {}
+        if self.native_frame_due.is_some() && !self.editor.should_close() {
+            self.render_now().await;
+        }
         let errors = self.close().await;
         for error in errors {
             log::error!("Error closing editor: {error}");
@@ -390,6 +446,11 @@ impl<B: Backend> Application<B> {
             tokio::select! {
                 biased;
 
+                _ = async {
+                    if let Some(due) = self.native_frame_due { tokio::time::sleep_until(due).await; }
+                    else { std::future::pending::<()>().await; }
+                } => { self.render_now().await; }
+
                 Some(signal) = self.signals.next() => {
                     if !self.handle_signals(signal).await {
                         return false;
@@ -399,6 +460,21 @@ impl<B: Backend> Application<B> {
                     match event {
                         Some(ApplicationEvent::Terminal(event)) => self.handle_terminal_events(event).await,
                         Some(ApplicationEvent::Input(event)) => self.handle_input_event(event).await,
+                        Some(ApplicationEvent::TimedInput(event, queued_at)) => {
+                            self.native_input_at.get_or_insert(queued_at);
+                            self.handle_input_event(event).await;
+                        }
+                        Some(ApplicationEvent::Ui(event)) => {
+                            if let crate::frontend::UiEvent::Keys(keys) = event {
+                                for key in keys { self.handle_input_event(Event::Key(key)).await; }
+                                continue;
+                            }
+                            let mut cx = crate::compositor::Context {
+                                editor: &mut self.editor, jobs: &mut self.jobs, scroll: None,
+                            };
+                            self.compositor.handle_ui_event(&event, &mut cx);
+                            if !self.editor.should_close() { self.render().await; }
+                        }
                         Some(ApplicationEvent::Theme(mode)) => {
                             self.theme_mode = Some(mode);
                             let config = self.config.load();
@@ -496,6 +572,7 @@ impl<B: Backend> Application<B> {
             ConfigEvent::Update(editor_config) => {
                 let mut app_config = (*self.config.load().clone()).clone();
                 app_config.editor = *editor_config;
+                app_config.editor.true_color |= self.terminal.backend().supports_true_color();
                 if let Err(err) = self.terminal.reconfigure((&app_config.editor).into()) {
                     self.editor.set_error(err.to_string());
                 };
@@ -526,8 +603,9 @@ impl<B: Backend> Application<B> {
 
     fn refresh_config(&mut self) {
         let mut refresh_config = || -> Result<(), Error> {
-            let default_config = Config::load_default()
+            let mut default_config = Config::load_default()
                 .map_err(|err| anyhow::anyhow!("Failed to load config: {}", err))?;
+            default_config.editor.true_color |= self.terminal.backend().supports_true_color();
 
             // Apply any change to editor.workspace_trust before reading local language config.
             self.editor

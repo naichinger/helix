@@ -9,12 +9,17 @@ cargo run -p helix-gpui -- --vsplit first.rs second.rs
 cargo run -p helix-gpui -- --tutor
 ```
 
-On NixOS, from the repository root:
+With Nix, from the repository root:
 
 ```sh
-nix-shell helix-gpui/shell.nix
-cargo run -p helix-gpui -- README.md
+nix run
+nix run . -- README.md
+nix run .#helix -- README.md # terminal frontend
 ```
+
+The default flake application is GPUI. Its package includes the Helix runtime,
+tree-sitter grammars, and Linux library paths needed to start without a development
+shell. `nix develop` provides the GPUI build environment.
 
 The GPUI version is pinned to 0.2.2. On Linux, building requires Clang/libclang,
 pkg-config, OpenSSL, Fontconfig, FreeType, Wayland, X11/XCB, libxkbcommon (including
@@ -53,10 +58,13 @@ workspace-trust requirements.
 - Click or drag in a buffer to position or extend selections. Wheel and trackpad
   input scroll the view under the pointer. Click picker or completion rows to
   select them. Keyboard filtering and navigation work as in `hx`.
-- Drop files or folders into the window, use File → Open, or use Helix's picker.
-- Use the in-window File, Edit, Selection, Search, View, Code and Debug menus.
-  GPUI also installs the platform menu bar where supported. F10 focuses the
-  in-window menus; arrows navigate, Enter activates, and Escape dismisses.
+- Click tabs to switch documents and their close buttons to close saved documents.
+  Modified documents remain open with a save reminder. Drag the divider between
+  splits to resize either vertically or horizontally; proportions survive window
+  resizing.
+- Drop files or folders into the window, use the open-file shortcut, or use Helix's picker.
+- The window has no top menu bar. Use the command palette, Helix keymaps, or
+  command prompt for editor actions. The tab strip includes a new-buffer button.
 - On Linux/Windows, Ctrl+Shift+O opens files, Ctrl+Shift+S saves,
   Ctrl+Shift+P opens the command palette, and Ctrl+Shift+Q quits.
   On macOS, use Command with those letters.
@@ -67,10 +75,29 @@ workspace-trust requirements.
   and Helix displays its normal error. Save first or explicitly use `:quit-all!`
   to discard modifications. Pending writes and language servers are closed
   before the UI exits.
-- View → Zoom changes the buffer font size. `HELIX_GPUI_FONT` selects an installed
+- Ctrl+Shift+=/−/0 (Command on macOS) zooms in/out or resets the buffer font size. `HELIX_GPUI_FONT` selects an installed
   font family; `HELIX_GPUI_FONT_SIZE` sets the initial size (8–40 pixels).
   The default selects an installed monospace font. Adaptive Helix themes follow
   platform appearance changes.
+
+## Appearance
+
+The desktop shell takes inspiration from Zeron: neutral layered surfaces, a
+sans-serif UI font, rounded tabs and panels, muted labels, thin dividers and a
+restrained violet accent. The command prompt floats at the top center, and the
+status bar fills the bottom edge without reserving an empty message row. Buffer
+text keeps its configured monospace font and syntax colors.
+
+When no theme is configured, `hx-gpui` uses `helix_gpui`. Explicit Helix themes are
+respected, and the chrome switches between light and dark neutral palettes to
+match the buffer. You can also select the new theme with `:theme helix_gpui`.
+UI tokens live in `src/design.rs`; the editor palette lives in
+`runtime/themes/helix_gpui.toml`.
+
+For Zeron's diff-viewer colors, use `:theme zeron_diff` or set
+`theme = "zeron_diff"` in your Helix configuration. This theme uses Zeron's
+near-black background, violet keywords, blue functions, pink properties, emerald
+strings, and faint green/red diff backgrounds.
 
 ## Rendering and integration
 
@@ -79,19 +106,33 @@ clipping, and `ElementInputHandler`. It maintains Helix's grapheme-column geomet
 for selections, soft wrap, gutters, splits, annotations, cursor positions and hit
 testing. Adjacent text with identical styling is shaped in runs.
 
-Picker and completion/menu regions are identified during Helix layout and rendered
-with GPUI `uniform_list` and interactive row elements. Menus use GPUI actions;
-they execute commands directly through Helix's command state, preserving undo
-history and pending-input handling even with customized keymaps. Other Helix
-surfaces (prompts, statuslines, borders, documentation and previews) use the
-shared styled surface. This is an in-process frontend, with no PTY or terminal
-escape-sequence parser.
+Pickers and command/search prompts have a separate semantic rendering path.
+Helix publishes full text, styled columns, fuzzy-match highlights, query state,
+completion candidates and logical row identities. GPUI builds bordered panels,
+`StyledText` labels, `uniform_list` rows and shaped input fields from those models.
+These components do not render terminal cells or ASCII borders. Pointer actions
+identify the selected item directly; stale actions after a query change are ignored.
+Prompt caret placement and horizontal scrolling use GPUI text shaping, including
+Unicode and IME preedit. The old code that scraped picker rows from cells is gone.
+
+Desktop shortcuts use GPUI actions and execute commands directly through Helix's command
+state, preserving undo history and pending-input handling with customized keymaps.
+Tabs, split dividers, status bars, key hints, completion/code-action menus, hover,
+signature help, Markdown and dialogs all use native GPUI elements. Markdown rules
+are graphical dividers and links are clickable. Only document buffers and their
+previews use the cell-based buffer element. Every component must provide a native
+renderer; there is no TUI fallback for editor chrome. See [native rendering](NATIVE.md).
+There is no PTY or terminal escape-sequence parser.
 
 The compositor stays on a dedicated thread under Tokio. GPUI receives coalesced
 immutable frames, and sends input back through a channel. The same asynchronous
 loop processes editor, LSP, DAP and job events. Resizing takes effect on that
 thread before layout. Clipboard requests are serviced on GPUI's foreground
 thread. Frontend failures are displayed and logged.
+
+Input processing does not wait for background diff rendering locks. Redraws are
+combined within an 8 ms interval while retaining every input event in order.
+`HELIX_GPUI_TRACE_LATENCY=1` enables input-to-paint timings in the Helix log.
 
 ## Validation and current limits
 
@@ -101,13 +142,18 @@ HELIX_DISABLE_AUTO_GRAMMAR_BUILD=1 cargo test -p helix-term --features integrati
 bash helix-gpui/tests/smoke-x11.sh
 ```
 
-The frontend tests cover buffer frames and resizing, modifier translation, menu
-command validity, Unicode editing and saving, undo after menu actions, picker
-mouse activation, and modified-buffer quit protection.
+The frontend tests cover buffer frames and resizing, modifier translation, shortcut
+command validity, Unicode editing and saving, undo after desktop actions, semantic
+picker activation, stale-action rejection, Unicode prompt cursors, prompt completion,
+and modified-buffer quit protection. They also verify that native pickers and
+prompts do not rasterize their contents into the buffer surface.
+Additional tests cover native tab switching and close protection, popup callbacks,
+Markdown links/rules, split resizing, rapid input and background-render-lock latency.
 The X11 smoke test requires Xvfb, Openbox, xdotool and ImageMagick, and runs in
-an isolated display. It exercises real keyboard input, native menus, picker
-clicks, clipboard round trips, saving, resizing and quit protection; screenshots
-are saved in its temporary artifact directory.
+an isolated display. It exercises real keyboard input, desktop shortcuts, picker and
+insert-completion clicks, tab switching, divider dragging, clipboard round trips,
+saving, resizing and quit protection. Screenshots are saved in its temporary
+artifact directory.
 
 Linux/X11 has been exercised with a real GPUI window, keyboard input, saving,
 pickers and shutdown. Wayland, macOS and Windows still need interactive validation.

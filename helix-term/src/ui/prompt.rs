@@ -29,6 +29,7 @@ type CallbackFn = Box<dyn FnMut(&mut Context, &str, PromptEvent)>;
 pub type DocFn = Box<dyn Fn(&str) -> Option<Cow<str>>>;
 
 pub struct Prompt {
+    native_id: Option<crate::frontend::WidgetId>,
     prompt: Cow<'static, str>,
     line: String,
     cursor: usize,
@@ -87,6 +88,7 @@ impl Prompt {
         callback_fn: impl FnMut(&mut Context, &str, PromptEvent) + 'static,
     ) -> Self {
         Self {
+            native_id: None,
             prompt,
             line: String::new(),
             cursor: 0,
@@ -110,6 +112,56 @@ impl Prompt {
     #[inline]
     pub(crate) fn position(&self) -> usize {
         self.cursor
+    }
+
+    pub(crate) fn native_snapshot(&mut self, editor: &Editor) -> crate::frontend::Prompt {
+        let id = *self
+            .native_id
+            .get_or_insert_with(crate::frontend::WidgetId::new);
+        // The native input shapes and scrolls the complete string itself.
+        self.anchor = 0;
+        self.truncate_start = false;
+        self.truncate_end = false;
+        crate::frontend::Prompt {
+            id,
+            label: self.prompt.to_string(),
+            text: self.line.clone(),
+            cursor: self.cursor,
+            suggestion: self
+                .line
+                .is_empty()
+                .then(|| {
+                    self.first_history_completion(editor)
+                        .map(|s| s.into_owned())
+                })
+                .flatten(),
+            completions: self
+                .completion
+                .iter()
+                .map(|(_, span)| {
+                    crate::frontend::RichText::plain(span.content.to_string(), span.style)
+                })
+                .collect(),
+            selected: self.selection,
+            documentation: (self.doc_fn)(&self.line).map(|doc| doc.into_owned()),
+            styled_text: self
+                .language
+                .as_ref()
+                .map(|(language, loader)| {
+                    crate::frontend::RichText::from_text(
+                        &crate::ui::markdown::highlighted_code_block(
+                            &self.line,
+                            language,
+                            Some(&editor.theme),
+                            &loader.load(),
+                            None,
+                        ),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    crate::frontend::RichText::plain(self.line.clone(), editor.theme.get("ui.text"))
+                }),
+        }
     }
 
     pub fn with_line(mut self, line: String, editor: &Editor) -> Self {
@@ -155,6 +207,7 @@ impl Prompt {
     }
 
     pub fn recalculate_completion(&mut self, editor: &Editor) {
+        self.native_id = None;
         self.exit_selection();
         self.completion = (self.completion_fn)(editor, &self.line);
     }
@@ -603,7 +656,54 @@ impl Prompt {
 }
 
 impl Component for Prompt {
+    fn render_native(
+        &mut self,
+        area: Rect,
+        _surface: &mut Surface,
+        cx: &mut Context,
+        widgets: &mut Vec<crate::frontend::Widget>,
+    ) {
+        widgets.push(crate::frontend::Widget {
+            scroll: 0,
+            area,
+            style: cx.editor.theme.get("ui.menu"),
+            selected_style: cx.editor.theme.get("ui.menu.selected"),
+            border_style: cx.editor.theme.get("ui.background.separator"),
+            content: crate::frontend::WidgetContent::Prompt(self.native_snapshot(cx.editor)),
+        });
+    }
+
+    fn handle_ui_event(
+        &mut self,
+        event: &crate::frontend::UiEvent,
+        cx: &mut Context,
+    ) -> EventResult {
+        if let crate::frontend::UiEvent::PromptCursor { id, byte } = *event {
+            if self.native_id == Some(id)
+                && byte <= self.line.len()
+                && self.line.is_char_boundary(byte)
+            {
+                self.cursor = byte;
+            }
+            return EventResult::Consumed(None);
+        }
+        if let crate::frontend::UiEvent::CompletePrompt { id, index } = *event {
+            if self.native_id == Some(id) && index < self.completion.len() {
+                self.selection = index.checked_sub(1);
+                self.change_completion_selection(CompletionDirection::Forward);
+                if self.completion.len() == 1 && self.line.ends_with(std::path::MAIN_SEPARATOR) {
+                    self.recalculate_completion(cx.editor);
+                }
+                (self.callback_fn)(cx, &self.line, PromptEvent::Update);
+            }
+        }
+        EventResult::Consumed(None)
+    }
+
     fn handle_event(&mut self, event: &Event, cx: &mut Context) -> EventResult {
+        if matches!(event, Event::Key(_) | Event::Paste(_)) {
+            self.native_id = None;
+        }
         let event = match event {
             Event::Paste(data) => {
                 self.insert_str(data, cx.editor);

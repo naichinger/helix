@@ -37,6 +37,7 @@ pub struct Menu<T: Item> {
     recalculate: bool,
     auto_close: bool,
     area: Rect,
+    native_id: Option<crate::frontend::WidgetId>,
 }
 
 impl<T: Item> Menu<T> {
@@ -63,6 +64,7 @@ impl<T: Item> Menu<T> {
             recalculate: true,
             auto_close: false,
             area: Rect::default(),
+            native_id: None,
         }
     }
 
@@ -73,6 +75,7 @@ impl<T: Item> Menu<T> {
     }
 
     pub fn update_options(&mut self) -> (&mut Vec<(u32, u32)>, &mut Vec<T>) {
+        self.native_id = None;
         self.recalculate = true;
         (&mut self.matches, &mut self.options)
     }
@@ -234,6 +237,66 @@ impl<T: Item + PartialEq> Menu<T> {
 use super::PromptEvent as MenuEvent;
 
 impl<T: Item + 'static> Component for Menu<T> {
+    fn render_native(
+        &mut self,
+        area: Rect,
+        _surface: &mut Surface,
+        cx: &mut Context,
+        widgets: &mut Vec<crate::frontend::Widget>,
+    ) {
+        use crate::frontend::{Menu, RichText, Widget, WidgetContent, WidgetId};
+        self.area = area;
+        self.size.1 = area.height.max(1);
+        self.adjust_scroll();
+        let id = *self.native_id.get_or_insert_with(WidgetId::new);
+        let rows = self
+            .matches
+            .iter()
+            .skip(self.scroll)
+            .take(area.height.max(1) as usize)
+            .map(|(index, _)| {
+                self.options[*index as usize]
+                    .format(&self.editor_data)
+                    .cells
+                    .iter()
+                    .map(|cell| RichText::from_text(&cell.content))
+                    .collect()
+            })
+            .collect();
+        let mut widget = Widget::new(
+            area,
+            cx.editor.theme.get("ui.menu"),
+            WidgetContent::Menu(Menu {
+                id,
+                rows,
+                selected: self.cursor,
+                offset: self.scroll,
+                total: self.matches.len(),
+            }),
+        );
+        widget.selected_style = cx.editor.theme.get("ui.selection");
+        widgets.push(widget);
+    }
+
+    fn handle_ui_event(
+        &mut self,
+        event: &crate::frontend::UiEvent,
+        cx: &mut Context,
+    ) -> EventResult {
+        if let crate::frontend::UiEvent::Menu { id, index, accept } = *event {
+            if self.native_id == Some(id) && index < self.matches.len() {
+                self.cursor = Some(index);
+                self.adjust_scroll();
+                (self.callback_fn)(cx.editor, self.selection(), MenuEvent::Update);
+                if accept {
+                    return self.handle_event(&Event::Key(key!(Enter)), cx);
+                }
+                return EventResult::Consumed(None);
+            }
+        }
+        EventResult::Ignored(None)
+    }
+
     fn handle_event(&mut self, event: &Event, cx: &mut Context) -> EventResult {
         use helix_view::input::{MouseButton, MouseEventKind};
         if let Event::Mouse(mouse) = event {

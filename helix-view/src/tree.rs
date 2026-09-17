@@ -62,6 +62,7 @@ pub enum Direction {
 
 #[derive(Debug)]
 pub struct Container {
+    weights: Vec<f32>,
     layout: Layout,
     children: Vec<ViewId>,
     area: Rect,
@@ -70,11 +71,20 @@ pub struct Container {
 impl Container {
     pub fn new(layout: Layout) -> Self {
         Self {
+            weights: Vec::new(),
             layout,
             children: Vec::new(),
             area: Rect::default(),
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct SplitDivider {
+    pub parent: ViewId,
+    pub index: usize,
+    pub layout: Layout,
+    pub area: Rect,
 }
 
 impl Default for Container {
@@ -379,6 +389,46 @@ impl Tree {
                     // debug!!("setting container area {:?}", area);
                     container.area = area;
 
+                    if container.weights.len() == container.children.len()
+                        && !container.weights.is_empty()
+                    {
+                        let vertical = container.layout == Layout::Vertical;
+                        let gap = u16::from(vertical);
+                        let extent = if vertical { area.width } else { area.height };
+                        let available =
+                            extent.saturating_sub(gap * (container.children.len() as u16 - 1));
+                        let total: f32 = container.weights.iter().sum();
+                        let mut used = 0u16;
+                        let mut weight = 0.;
+                        for (i, child) in container.children.iter().enumerate() {
+                            weight += container.weights[i];
+                            let end = if i + 1 == container.children.len() {
+                                available
+                            } else {
+                                (available as f32 * weight / total).round() as u16
+                            };
+                            let rect = if vertical {
+                                Rect::new(
+                                    area.x + used + gap * i as u16,
+                                    area.y,
+                                    end.saturating_sub(used),
+                                    area.height,
+                                )
+                            } else {
+                                Rect::new(
+                                    area.x,
+                                    area.y + used,
+                                    area.width,
+                                    end.saturating_sub(used),
+                                )
+                            };
+                            self.stack.push((*child, rect));
+                            used = end;
+                        }
+                        continue;
+                    }
+                    container.weights.clear();
+
                     match container.layout {
                         Layout::Horizontal => {
                             let len = container.children.len();
@@ -443,6 +493,105 @@ impl Tree {
 
     pub fn traverse(&self) -> Traverse<'_> {
         Traverse::new(self)
+    }
+
+    fn node_area(&self, id: ViewId) -> Rect {
+        match &self.nodes[id].content {
+            Content::View(view) => view.area,
+            Content::Container(container) => container.area,
+        }
+    }
+
+    pub fn dividers(&self) -> Vec<SplitDivider> {
+        let mut dividers = Vec::new();
+        for (parent, node) in &self.nodes {
+            let Content::Container(container) = &node.content else {
+                continue;
+            };
+            for (index, child) in container
+                .children
+                .iter()
+                .enumerate()
+                .take(container.children.len().saturating_sub(1))
+            {
+                let child_area = self.node_area(*child);
+                let area = match container.layout {
+                    Layout::Vertical => Rect::new(
+                        child_area.right(),
+                        container.area.y,
+                        1,
+                        container.area.height,
+                    ),
+                    Layout::Horizontal => Rect::new(
+                        container.area.x,
+                        child_area.bottom(),
+                        container.area.width,
+                        1,
+                    ),
+                };
+                dividers.push(SplitDivider {
+                    parent,
+                    index,
+                    layout: container.layout,
+                    area,
+                });
+            }
+        }
+        dividers
+    }
+
+    /// Resize adjacent children while retaining every other split's size.
+    /// Weights preserve the ratio across subsequent window resizes.
+    pub fn resize_divider(&mut self, parent: ViewId, index: usize, position: u16) -> bool {
+        let Some(Node {
+            content: Content::Container(container),
+            ..
+        }) = self.nodes.get(parent)
+        else {
+            return false;
+        };
+        if index + 1 >= container.children.len() {
+            return false;
+        }
+        let vertical = container.layout == Layout::Vertical;
+        let areas: Vec<_> = container
+            .children
+            .iter()
+            .map(|id| self.node_area(*id))
+            .collect();
+        let before = areas[index];
+        let after = areas[index + 1];
+        let start = if vertical { before.x } else { before.y };
+        let total = if vertical {
+            before.width + after.width
+        } else {
+            before.height + after.height
+        };
+        let minimum = if vertical { 8 } else { 3 };
+        if total < minimum * 2 {
+            return false;
+        }
+        let first = position
+            .saturating_sub(start)
+            .clamp(minimum, total - minimum);
+        let mut weights: Vec<_> = areas
+            .iter()
+            .map(|area| {
+                if vertical {
+                    area.width as f32
+                } else {
+                    area.height as f32
+                }
+            })
+            .collect();
+        weights[index] = first as f32;
+        weights[index + 1] = (total - first) as f32;
+        let Content::Container(container) = &mut self.nodes[parent].content else {
+            unreachable!()
+        };
+        container.weights = weights;
+        self.recalculate();
+        true
     }
 
     // Finds the split in the given direction if it exists
@@ -727,6 +876,45 @@ mod test {
     use super::*;
     use crate::editor::GutterConfig;
     use crate::DocumentId;
+
+    #[test]
+    fn dragged_dividers_preserve_ratios_and_sibling_sizes() {
+        for layout in [Layout::Vertical, Layout::Horizontal] {
+            let mut tree = Tree::new(Rect::new(0, 0, 180, 90));
+            tree.insert(View::new(DocumentId::default(), GutterConfig::default()));
+            tree.split(
+                View::new(DocumentId::default(), GutterConfig::default()),
+                layout,
+            );
+            tree.split(
+                View::new(DocumentId::default(), GutterConfig::default()),
+                layout,
+            );
+            let divider = tree.dividers()[0].clone();
+            let before: Vec<_> = tree.views().map(|(view, _)| view.area).collect();
+            let position = if layout == Layout::Vertical { 30 } else { 15 };
+            assert!(tree.resize_divider(divider.parent, divider.index, position));
+            let after: Vec<_> = tree.views().map(|(view, _)| view.area).collect();
+            assert_eq!(after[2], before[2]);
+            let extent = |area: Rect| {
+                if layout == Layout::Vertical {
+                    area.width
+                } else {
+                    area.height
+                }
+            };
+            assert_eq!(extent(after[0]), position);
+            tree.resize(Rect::new(0, 0, 360, 180));
+            let resized: Vec<_> = tree.views().map(|(view, _)| view.area).collect();
+            assert!(extent(resized[0]).abs_diff(position * 2) <= 1);
+            assert!(tree.resize_divider(divider.parent, divider.index, 0));
+            assert!(tree.views().all(|(view, _)| extent(view.area) >= 3));
+            tree.remove(tree.focus);
+            tree.recalculate();
+            assert_eq!(tree.views().count(), 2);
+            assert!(!tree.resize_divider(ViewId::default(), 99, 0));
+        }
+    }
 
     #[test]
     fn find_split_in_direction() {

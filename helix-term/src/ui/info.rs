@@ -6,6 +6,33 @@ use tui::text::Text;
 use tui::widgets::{Block, Paragraph, Widget};
 
 impl Component for Info {
+    fn render_native(
+        &mut self,
+        viewport: Rect,
+        _surface: &mut Surface,
+        cx: &mut Context,
+        widgets: &mut Vec<crate::frontend::Widget>,
+    ) {
+        let width = (self.width + 6).min(viewport.width);
+        let height = (self.height + 3).min(viewport.height.saturating_sub(2));
+        let area = Rect::new(
+            viewport.right().saturating_sub(width),
+            viewport.bottom().saturating_sub(height + 2),
+            width,
+            height,
+        );
+        widgets.push(crate::frontend::Widget::new(
+            area,
+            cx.editor
+                .theme
+                .get("ui.popup.info")
+                .patch(cx.editor.theme.get("ui.text.info")),
+            crate::frontend::WidgetContent::Hints {
+                title: self.title.to_string(),
+                entries: self.entries.clone(),
+            },
+        ));
+    }
     fn render(&mut self, viewport: Rect, surface: &mut Surface, cx: &mut Context) {
         let text_style = cx.editor.theme.get("ui.text.info");
         let popup_style = cx.editor.theme.get("ui.popup.info");

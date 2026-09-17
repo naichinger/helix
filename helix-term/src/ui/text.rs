@@ -30,6 +30,22 @@ impl From<tui::text::Text<'static>> for Text {
 }
 
 impl Component for Text {
+    fn render_native(
+        &mut self,
+        area: Rect,
+        _surface: &mut Surface,
+        cx: &mut Context,
+        widgets: &mut Vec<crate::frontend::Widget>,
+    ) {
+        widgets.push(crate::frontend::Widget::new(
+            area,
+            cx.editor.theme.get("ui.popup"),
+            crate::frontend::WidgetContent::Text {
+                title: String::new(),
+                text: crate::frontend::RichText::from_text(&self.contents),
+            },
+        ));
+    }
     fn render(&mut self, area: Rect, surface: &mut Surface, _cx: &mut Context) {
         use tui::widgets::{Paragraph, Widget, Wrap};
 

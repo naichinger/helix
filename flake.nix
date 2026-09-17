@@ -23,39 +23,67 @@
         overlays = [(import rust-overlay) self.overlays.helix];
       });
     gitRev = self.rev or self.dirtyRev or null;
+    gpuiSystems = ["x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin"];
   in {
-    packages = eachSystem (system: {
-      inherit (pkgsFor.${system}) helix;
-      /*
-      The default Helix build. Uses the latest stable Rust toolchain, and unstable
-      nixpkgs.
+    packages = eachSystem (system:
+      {
+        inherit (pkgsFor.${system}) helix;
+        /*
+        The default Helix build. Uses the latest stable Rust toolchain, and unstable
+        nixpkgs.
 
-      The build inputs can be overridden with the following:
+        The build inputs can be overridden with the following:
 
-      packages.${system}.default.override { rustPlatform = newPlatform; };
+        packages.${system}.default.override { rustPlatform = newPlatform; };
 
-      Overriding a derivation attribute can be done as well:
+        Overriding a derivation attribute can be done as well:
 
-      packages.${system}.default.overrideAttrs { buildType = "debug"; };
-      */
-      default = self.packages.${system}.helix;
-    });
-    checks =
-      lib.mapAttrs (system: pkgs: let
-        # Get Helix's MSRV toolchain to build with by default.
-        msrvToolchain = pkgs.pkgsBuildHost.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
-        msrvPlatform = pkgs.makeRustPlatform {
-          cargo = msrvToolchain;
-          rustc = msrvToolchain;
+        packages.${system}.default.overrideAttrs { buildType = "debug"; };
+        */
+        default =
+          if builtins.elem system gpuiSystems
+          then self.packages.${system}.helix-gpui
+          else self.packages.${system}.helix;
+      }
+      // lib.optionalAttrs (builtins.elem system gpuiSystems) {
+        inherit (pkgsFor.${system}) helix-gpui;
+      });
+    apps = eachSystem (system:
+      {
+        default = {
+          type = "app";
+          program = lib.getExe self.packages.${system}.default;
         };
-      in {
+        helix = {
+          type = "app";
+          program = lib.getExe self.packages.${system}.helix;
+        };
+      }
+      // lib.optionalAttrs (builtins.elem system gpuiSystems) {
+        helix-gpui = {
+          type = "app";
+          program = lib.getExe self.packages.${system}.helix-gpui;
+        };
+      });
+    checks = lib.mapAttrs (system: pkgs: let
+      # Get Helix's MSRV toolchain to build with by default.
+      msrvToolchain = pkgs.pkgsBuildHost.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+      msrvPlatform = pkgs.makeRustPlatform {
+        cargo = msrvToolchain;
+        rustc = msrvToolchain;
+      };
+    in
+      {
         helix = self.packages.${system}.helix.override {
           rustPlatform = msrvPlatform;
         };
+      }
+      // lib.optionalAttrs (builtins.elem system gpuiSystems) {
+        helix-gpui = self.packages.${system}.helix-gpui;
       })
-      pkgsFor;
+    pkgsFor;
 
-    # Devshell behavior is preserved.
+    # Include the default frontend's native build dependencies in the dev shell.
     devShells =
       lib.mapAttrs (system: pkgs: {
         default = let
@@ -64,7 +92,7 @@
         in
           pkgs.mkShell {
             inputsFrom = [
-              (self.checks.${system}.helix.override {
+              (self.packages.${system}.default.override {
                 includeGrammarIf = _: false;
               })
             ];
@@ -88,6 +116,7 @@
     overlays = {
       helix = final: prev: {
         helix = final.callPackage ./default.nix {inherit gitRev;};
+        helix-gpui = final.callPackage ./helix-gpui/package.nix {inherit gitRev;};
       };
 
       default = self.overlays.helix;

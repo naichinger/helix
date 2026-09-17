@@ -120,6 +120,41 @@ pub fn render(context: &mut RenderContext, viewport: Rect, surface: &mut Surface
     );
 }
 
+pub fn native(context: &mut RenderContext, area: Rect) -> crate::frontend::Widget {
+    let style = context.editor.theme.get(if context.focused {
+        "ui.statusline"
+    } else {
+        "ui.statusline.inactive"
+    });
+    let config = context.editor.config();
+    for id in &config.statusline.left {
+        get_render_function(*id)(context, |context, span| {
+            append(&mut context.parts.left, span, style)
+        });
+    }
+    for id in &config.statusline.center {
+        get_render_function(*id)(context, |context, span| {
+            append(&mut context.parts.center, span, style)
+        });
+    }
+    for id in &config.statusline.right {
+        get_render_function(*id)(context, |context, span| {
+            append(&mut context.parts.right, span, style)
+        });
+    }
+    let rich =
+        |spans: &Spans| crate::frontend::RichText::from_text(&tui::text::Text::from(spans.clone()));
+    crate::frontend::Widget::new(
+        area,
+        style,
+        crate::frontend::WidgetContent::Status {
+            left: rich(&context.parts.left),
+            center: rich(&context.parts.center),
+            right: rich(&context.parts.right),
+        },
+    )
+}
+
 fn append<'a>(buffer: &mut Spans<'a>, mut span: Span<'a>, base_style: Style) {
     span.style = base_style.patch(span.style);
     buffer.0.push(span);
