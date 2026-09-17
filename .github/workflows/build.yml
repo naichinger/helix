@@ -56,6 +56,8 @@ jobs:
           cache-grammars: 'true'
           grammar-cache-version: ${{ env.GRAMMAR_CACHE_VERSION }}
 
+      - uses: ./.github/actions/gpui-setup
+
       - name: Run cargo test
         run: cargo test --workspace
 
@@ -82,6 +84,8 @@ jobs:
 
       - name: Run cargo fmt
         run: cargo fmt --all --check
+
+      - uses: ./.github/actions/gpui-setup
 
       - name: Run cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Helix GPUI
+GenericName=Text Editor
+Comment=Edit text files with the Helix graphical frontend
+TryExec=hx-gpui
+Exec=hx-gpui %F
+Terminal=false
+Type=Application
+Icon=helix
+Categories=Utility;TextEditor;Development;
+Keywords=Text;Editor;Helix;
+StartupNotify=false
+MimeType=text/plain;text/x-c;text/x-c++;text/x-python;text/x-rust;application/x-shellscript;

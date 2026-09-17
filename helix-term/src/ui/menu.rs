@@ -36,6 +36,7 @@ pub struct Menu<T: Item> {
     viewport: (u16, u16),
     recalculate: bool,
     auto_close: bool,
+    area: Rect,
 }
 
 impl<T: Item> Menu<T> {
@@ -61,6 +62,7 @@ impl<T: Item> Menu<T> {
             viewport: (0, 0),
             recalculate: true,
             auto_close: false,
+            area: Rect::default(),
         }
     }
 
@@ -233,6 +235,32 @@ use super::PromptEvent as MenuEvent;
 
 impl<T: Item + 'static> Component for Menu<T> {
     fn handle_event(&mut self, event: &Event, cx: &mut Context) -> EventResult {
+        use helix_view::input::{MouseButton, MouseEventKind};
+        if let Event::Mouse(mouse) = event {
+            if self.matches.is_empty() {
+                return EventResult::Consumed(None);
+            }
+            match mouse.kind {
+                MouseEventKind::ScrollUp => self.move_up(),
+                MouseEventKind::ScrollDown => self.move_down(),
+                MouseEventKind::Down(MouseButton::Left)
+                    if mouse.column >= self.area.x
+                        && mouse.column < self.area.right()
+                        && mouse.row >= self.area.y
+                        && mouse.row < self.area.bottom() =>
+                {
+                    let index = self.scroll + (mouse.row - self.area.y) as usize;
+                    if index < self.matches.len() {
+                        self.cursor = Some(index);
+                        (self.callback_fn)(cx.editor, self.selection(), MenuEvent::Update);
+                        return self.handle_event(&Event::Key(key!(Enter)), cx);
+                    }
+                }
+                _ => return EventResult::Consumed(None),
+            }
+            (self.callback_fn)(cx.editor, self.selection(), MenuEvent::Update);
+            return EventResult::Consumed(None);
+        }
         let event = match event {
             Event::Key(event) => *event,
             // Menu is a modal and should consume mouse events so clicks don't fall
@@ -333,6 +361,13 @@ impl<T: Item + 'static> Component for Menu<T> {
     }
 
     fn render(&mut self, area: Rect, surface: &mut Surface, cx: &mut Context) {
+        self.area = area;
+        surface.lists.push(
+            area.with_height(
+                area.height
+                    .min(self.matches.len().saturating_sub(self.scroll) as u16),
+            ),
+        );
         let theme = &cx.editor.theme;
         let style = theme
             .try_get("ui.menu")

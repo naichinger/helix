@@ -1199,6 +1199,26 @@ impl EditorView {
         self.pseudo_pending.clear();
     }
 
+    /// Execute a desktop menu action through the same command state as keys.
+    pub fn execute_command(
+        &mut self,
+        command: &commands::MappableCommand,
+        cx: &mut commands::Context,
+    ) {
+        self.handle_non_key_input(cx);
+        command.execute(cx);
+        self.on_next_key = cx.on_next_key_callback.take();
+        if !cx.editor.should_close() {
+            let config = cx.editor.config();
+            let mode = cx.editor.mode();
+            let (view, doc) = current!(cx.editor);
+            view.ensure_cursor_in_view(doc, config.scrolloff);
+            if mode != Mode::Insert {
+                doc.append_changes_to_history(view);
+            }
+        }
+    }
+
     fn handle_mouse_event(
         &mut self,
         event: &MouseEvent,
@@ -1591,7 +1611,34 @@ impl Component for EditorView {
                 EventResult::Consumed(callback)
             }
 
-            Event::Mouse(event) => self.handle_mouse_event(event, &mut cx),
+            Event::Mouse(mouse) => {
+                if let Some(completion) = &mut self.completion {
+                    let area = completion.area(cx.editor.tree.area(), cx.editor);
+                    if mouse.column >= area.x
+                        && mouse.column < area.right()
+                        && mouse.row >= area.y
+                        && mouse.row < area.bottom()
+                    {
+                        let mut context = Context {
+                            editor: cx.editor,
+                            jobs: cx.jobs,
+                            scroll: None,
+                        };
+                        if let EventResult::Consumed(callback) =
+                            completion.handle_event(event, &mut context)
+                        {
+                            if callback.is_some() {
+                                if let Some(callback) = self.clear_completion(cx.editor) {
+                                    self.on_next_key =
+                                        Some((callback, OnKeyCallbackKind::Fallback));
+                                }
+                            }
+                            return EventResult::Consumed(None);
+                        }
+                    }
+                }
+                self.handle_mouse_event(mouse, &mut cx)
+            }
             Event::IdleTimeout => self.handle_idle_timeout(&mut cx),
             Event::FocusGained => {
                 self.terminal_focused = true;

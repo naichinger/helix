@@ -4,6 +4,7 @@ members = [
   "helix-core",
   "helix-view",
   "helix-term",
+  "helix-gpui",
   "helix-tui",
   "helix-lsp-types",
   "helix-lsp",

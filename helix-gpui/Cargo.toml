@@ -1,0 +1,33 @@
+[package]
+name = "helix-gpui"
+description = "GPUI graphical frontend for Helix"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "hx-gpui"
+path = "src/main.rs"
+
+[features]
+default = ["git"]
+git = ["helix-term/git"]
+
+[dependencies]
+anyhow = "1"
+gpui = "=0.2.2"
+helix-core = { path = "../helix-core" }
+helix-loader = { path = "../helix-loader" }
+helix-stdx = { path = "../helix-stdx" }
+helix-term = { path = "../helix-term", default-features = false }
+helix-view = { path = "../helix-view" }
+tui = { package = "helix-tui", path = "../helix-tui", default-features = false }
+log = "0.4"
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+tokio-stream.workspace = true
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+helix-event = { path = "../helix-event", features = ["integration_test"] }

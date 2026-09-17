@@ -249,6 +249,8 @@ pub struct Picker<T: 'static + Send + Sync, D: 'static> {
     completion_height: u16,
 
     cursor: u32,
+    list_area: Rect,
+    list_offset: u32,
     prompt: Prompt,
     query: PickerQuery,
 
@@ -381,6 +383,8 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
             editor_data,
             version,
             cursor: 0,
+            list_area: Rect::default(),
+            list_offset: 0,
             prompt,
             query,
             truncate_start: true,
@@ -750,6 +754,11 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
         let end = offset
             .saturating_add(rows)
             .min(snapshot.matched_item_count());
+        self.list_area = inner
+            .clip_top(self.header_height())
+            .with_height((end - offset) as u16);
+        self.list_offset = offset;
+        surface.lists.push(self.list_area);
         let mut indices = Vec::new();
         let mut matcher = MATCHER.lock();
         matcher.config = Config::DEFAULT;
@@ -1051,6 +1060,24 @@ impl<I: 'static + Send + Sync, D: 'static + Send + Sync> Component for Picker<I,
     }
 
     fn handle_event(&mut self, event: &Event, ctx: &mut Context) -> EventResult {
+        use helix_view::input::{MouseButton, MouseEventKind};
+        if let Event::Mouse(mouse) = event {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => self.move_by(1, Direction::Backward),
+                MouseEventKind::ScrollDown => self.move_by(1, Direction::Forward),
+                MouseEventKind::Down(MouseButton::Left)
+                    if mouse.column >= self.list_area.x
+                        && mouse.column < self.list_area.right()
+                        && mouse.row >= self.list_area.y
+                        && mouse.row < self.list_area.bottom() =>
+                {
+                    self.cursor = self.list_offset + (mouse.row - self.list_area.y) as u32;
+                    return self.handle_event(&Event::Key(key!(Enter)), ctx);
+                }
+                _ => (),
+            }
+            return EventResult::Consumed(None);
+        }
         // TODO: keybinds for scrolling preview
 
         let key_event = match event {

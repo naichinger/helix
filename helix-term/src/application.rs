@@ -65,11 +65,11 @@ type TerminalEvent = termina::Event;
 #[cfg(windows)]
 type TerminalEvent = crossterm::event::Event;
 
-type Terminal = tui::terminal::Terminal<TerminalBackend>;
+type Terminal<B = TerminalBackend> = tui::terminal::Terminal<B>;
 
-pub struct Application {
+pub struct Application<B: Backend = TerminalBackend> {
     compositor: Compositor,
-    terminal: Terminal,
+    terminal: Terminal<B>,
     pub editor: Editor,
 
     config: Arc<ArcSwap<Config>>,
@@ -79,6 +79,16 @@ pub struct Application {
     lsp_progress: LspProgressMap,
 
     theme_mode: Option<theme::Mode>,
+    read_stdin: bool,
+}
+
+/// Input from a terminal or an embedded graphical frontend.
+pub enum ApplicationEvent {
+    Terminal(std::io::Result<TerminalEvent>),
+    Input(Event),
+    Command(crate::commands::MappableCommand),
+    Open(std::path::PathBuf),
+    Theme(theme::Mode),
 }
 
 #[cfg(feature = "integration")]
@@ -100,12 +110,6 @@ impl Application {
         #[cfg(feature = "integration")]
         setup_integration_logging();
 
-        use helix_view::editor::Action;
-
-        let mut theme_parent_dirs = vec![helix_loader::config_dir()];
-        theme_parent_dirs.extend(helix_loader::runtime_dirs().iter().cloned());
-        let theme_loader = theme::Loader::new(&theme_parent_dirs);
-
         #[cfg(all(not(windows), not(feature = "integration")))]
         let backend = TerminaBackend::new((&config.editor).into())
             .context("failed to create terminal backend")?;
@@ -114,6 +118,49 @@ impl Application {
 
         #[cfg(feature = "integration")]
         let backend = TestBackend::new(120, 150);
+
+        Self::new_with_backend(args, config, lang_loader, workspace_trust, backend, true)
+    }
+
+    #[cfg(all(not(feature = "integration"), not(windows)))]
+    pub fn event_stream(&self) -> impl Stream<Item = std::io::Result<TerminalEvent>> + Unpin {
+        use termina::{escape::csi, Terminal as _};
+        let reader = self.terminal.backend().terminal().event_reader();
+        termina::EventStream::new(reader, |event| {
+            !event.is_escape()
+                || matches!(
+                    event,
+                    termina::Event::Csi(csi::Csi::Mode(csi::Mode::ReportTheme(_)))
+                )
+        })
+    }
+
+    #[cfg(all(not(feature = "integration"), windows))]
+    pub fn event_stream(&self) -> impl Stream<Item = std::io::Result<TerminalEvent>> + Unpin {
+        crossterm::event::EventStream::new()
+    }
+
+    #[cfg(feature = "integration")]
+    pub fn event_stream(&self) -> impl Stream<Item = std::io::Result<TerminalEvent>> + Unpin {
+        futures_util::stream::pending()
+    }
+}
+
+impl<B: Backend> Application<B> {
+    /// Construct an application without assuming ownership of a terminal or stdin.
+    pub fn new_with_backend(
+        args: Args,
+        config: Config,
+        lang_loader: syntax::Loader,
+        workspace_trust: helix_loader::workspace_trust::WorkspaceTrust,
+        backend: B,
+        read_stdin: bool,
+    ) -> Result<Self, Error> {
+        use helix_view::editor::Action;
+
+        let mut theme_parent_dirs = vec![helix_loader::config_dir()];
+        theme_parent_dirs.extend(helix_loader::runtime_dirs().iter().cloned());
+        let theme_loader = theme::Loader::new(&theme_parent_dirs);
 
         let theme_mode = backend.get_theme_mode();
         let mut terminal = Terminal::new(backend)?;
@@ -224,7 +271,7 @@ impl Application {
             } else {
                 editor.new_file(Action::VerticalSplit);
             }
-        } else if stdin().is_terminal() || cfg!(feature = "integration") {
+        } else if !read_stdin || stdin().is_terminal() || cfg!(feature = "integration") {
             editor.new_file(Action::VerticalSplit);
         } else {
             editor
@@ -253,6 +300,7 @@ impl Application {
             jobs,
             lsp_progress: LspProgressMap::new(),
             theme_mode,
+            read_stdin,
         };
 
         Ok(app)
@@ -308,6 +356,30 @@ impl Application {
     where
         S: Stream<Item = std::io::Result<TerminalEvent>> + Unpin,
     {
+        use futures_util::StreamExt;
+        self.event_loop_inner(&mut input_stream.map(ApplicationEvent::Terminal))
+            .await
+    }
+
+    /// Run the same jobs, LSP, DAP and editor event loop with frontend input.
+    pub async fn run_frontend<S>(&mut self, input_stream: &mut S) -> Result<i32, Error>
+    where
+        S: Stream<Item = ApplicationEvent> + Unpin,
+    {
+        self.render().await;
+        while self.event_loop_inner(input_stream).await {}
+        let errors = self.close().await;
+        for error in errors {
+            log::error!("Error closing editor: {error}");
+            self.editor.exit_code = 1;
+        }
+        Ok(self.editor.exit_code)
+    }
+
+    async fn event_loop_inner<S>(&mut self, input_stream: &mut S) -> bool
+    where
+        S: Stream<Item = ApplicationEvent> + Unpin,
+    {
         loop {
             if self.editor.should_close() {
                 return false;
@@ -323,8 +395,46 @@ impl Application {
                         return false;
                     };
                 }
-                Some(event) = input_stream.next() => {
-                    self.handle_terminal_events(event).await;
+                event = input_stream.next() => {
+                    match event {
+                        Some(ApplicationEvent::Terminal(event)) => self.handle_terminal_events(event).await,
+                        Some(ApplicationEvent::Input(event)) => self.handle_input_event(event).await,
+                        Some(ApplicationEvent::Theme(mode)) => {
+                            self.theme_mode = Some(mode);
+                            let config = self.config.load();
+                            if config.theme.as_ref().is_some_and(|theme| theme.is_adaptive()) {
+                                Self::load_configured_theme(&mut self.editor, &config, &mut self.terminal, self.theme_mode);
+                            }
+                            drop(config);
+                            self.render().await;
+                        }
+                        Some(ApplicationEvent::Command(command)) => {
+                            let mut cx = crate::commands::Context {
+                                register: None, count: None, editor: &mut self.editor,
+                                callback: Vec::new(), on_next_key_callback: None, jobs: &mut self.jobs,
+                            };
+                            if let Some(view) = self.compositor.find::<ui::EditorView>() {
+                                view.execute_command(&command, &mut cx);
+                            } else {
+                                command.execute(&mut cx);
+                            }
+                            let callbacks = std::mem::take(&mut cx.callback);
+                            let mut cx = crate::compositor::Context {
+                                editor: &mut self.editor, jobs: &mut self.jobs, scroll: None,
+                            };
+                            for callback in callbacks { callback(&mut self.compositor, &mut cx); }
+                            if !self.editor.should_close() { self.render().await; }
+                        }
+                        Some(ApplicationEvent::Open(path)) => {
+                            if path.is_dir() {
+                                self.compositor.push(Box::new(overlaid(ui::file_picker(&self.editor, path))));
+                            } else if let Err(error) = self.editor.open(&path, helix_view::editor::Action::Replace) {
+                                self.editor.set_error(error.to_string());
+                            }
+                            self.render().await;
+                        }
+                        None => return false,
+                    }
                 }
                 Some(callback) = self.jobs.callbacks.recv() => {
                     if let Some(job) = self.jobs.handle_callback(&mut self.editor, &mut self.compositor, Ok(Some(callback))) {
@@ -470,7 +580,7 @@ impl Application {
     fn load_configured_theme(
         editor: &mut Editor,
         config: &Config,
-        terminal: &mut Terminal,
+        terminal: &mut Terminal<B>,
         mode: Option<theme::Mode>,
     ) {
         let true_color = terminal.backend().supports_true_color()
@@ -513,6 +623,10 @@ impl Application {
 
     #[cfg(not(windows))]
     pub async fn handle_signals(&mut self, signal: i32) -> bool {
+        // A graphical window never suspends or claims its launching terminal.
+        if !self.read_stdin && matches!(signal, signal::SIGTSTP | signal::SIGCONT) {
+            return true;
+        }
         match signal {
             signal::SIGTSTP => {
                 self.restore_term().unwrap();
@@ -695,6 +809,26 @@ impl Application {
         }
 
         false
+    }
+
+    pub async fn handle_input_event(&mut self, event: Event) {
+        if let Event::Resize(width, height) = event {
+            let area = Rect::new(0, 0, width.max(1), height.max(1));
+            self.terminal.backend_mut().set_size(area);
+            self.terminal
+                .resize(area)
+                .expect("Unable to resize frontend");
+            self.compositor.resize(area);
+        }
+        let mut cx = crate::compositor::Context {
+            editor: &mut self.editor,
+            jobs: &mut self.jobs,
+            scroll: None,
+        };
+        let redraw = self.compositor.handle_event(&event, &mut cx);
+        if (redraw || matches!(event, Event::Resize(..))) && !self.editor.should_close() {
+            self.render().await;
+        }
     }
 
     pub async fn handle_terminal_events(&mut self, event: std::io::Result<TerminalEvent>) {
@@ -1277,46 +1411,6 @@ impl Application {
             .show_cursor(CursorKind::Block)
             .ok();
         self.terminal.restore()
-    }
-
-    #[cfg(all(not(feature = "integration"), not(windows)))]
-    pub fn event_stream(&self) -> impl Stream<Item = std::io::Result<TerminalEvent>> + Unpin {
-        use termina::{escape::csi, Terminal as _};
-        let reader = self.terminal.backend().terminal().event_reader();
-        termina::EventStream::new(reader, |event| {
-            // Accept either non-escape sequences or theme mode updates.
-            !event.is_escape()
-                || matches!(
-                    event,
-                    termina::Event::Csi(csi::Csi::Mode(csi::Mode::ReportTheme(_)))
-                )
-        })
-    }
-
-    #[cfg(all(not(feature = "integration"), windows))]
-    pub fn event_stream(&self) -> impl Stream<Item = std::io::Result<TerminalEvent>> + Unpin {
-        crossterm::event::EventStream::new()
-    }
-
-    #[cfg(feature = "integration")]
-    pub fn event_stream(&self) -> impl Stream<Item = std::io::Result<TerminalEvent>> + Unpin {
-        use std::{
-            pin::Pin,
-            task::{Context, Poll},
-        };
-
-        /// A dummy stream that never polls as ready.
-        pub struct DummyEventStream;
-
-        impl Stream for DummyEventStream {
-            type Item = std::io::Result<TerminalEvent>;
-
-            fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-                Poll::Pending
-            }
-        }
-
-        DummyEventStream
     }
 
     pub async fn run<S>(&mut self, input_stream: &mut S) -> Result<i32, Error>

@@ -31,6 +31,22 @@ pub enum ClipboardError {
 
 type Result<T> = std::result::Result<T, ClipboardError>;
 
+/// Clipboard implementation supplied by an embedding frontend.
+pub trait NativeClipboard: std::fmt::Debug + Send + Sync {
+    fn get(&self, clipboard_type: ClipboardType) -> Result<String>;
+    fn set(&self, content: &str, clipboard_type: ClipboardType) -> Result<()>;
+}
+
+#[derive(Debug, Clone)]
+pub struct NativeClipboardProvider(pub std::sync::Arc<dyn NativeClipboard>);
+
+impl PartialEq for NativeClipboardProvider {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for NativeClipboardProvider {}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use external::ClipboardProvider;
 #[cfg(target_arch = "wasm32")]
@@ -87,6 +103,8 @@ mod external {
     #[serde(rename_all = "kebab-case")]
     #[allow(clippy::large_enum_variant)]
     pub enum ClipboardProvider {
+        #[serde(skip)]
+        Native(NativeClipboardProvider),
         Pasteboard,
         Wayland,
         XClip,
@@ -197,6 +215,7 @@ mod external {
 
             match self {
                 // These names should match the config option names from Serde
+                Self::Native(_) => "native".into(),
                 Self::Pasteboard => builtin_name("pasteboard", &PASTEBOARD),
                 Self::Wayland => builtin_name("wayland", &WL_CLIPBOARD),
                 Self::XClip => builtin_name("x-clip", &XCLIP),
@@ -237,6 +256,7 @@ mod external {
 
             match self {
                 Self::Pasteboard => yank_from_builtin(PASTEBOARD, clipboard_type),
+                Self::Native(provider) => provider.0.get(*clipboard_type),
                 Self::Wayland => yank_from_builtin(WL_CLIPBOARD, clipboard_type),
                 Self::XClip => yank_from_builtin(XCLIP, clipboard_type),
                 Self::XSel => yank_from_builtin(XSEL, clipboard_type),
@@ -284,6 +304,7 @@ mod external {
 
             match self {
                 Self::Pasteboard => paste_to_builtin(PASTEBOARD, content, clipboard_type),
+                Self::Native(provider) => provider.0.set(content, clipboard_type),
                 Self::Wayland => paste_to_builtin(WL_CLIPBOARD, content, clipboard_type),
                 Self::XClip => paste_to_builtin(XCLIP, content, clipboard_type),
                 Self::XSel => paste_to_builtin(XSEL, content, clipboard_type),

@@ -32,6 +32,10 @@ pub struct Registers {
 }
 
 impl Registers {
+    /// Keep the frontend's clipboard connected across editor config reloads.
+    pub fn set_clipboard_provider(&mut self, provider: ClipboardProvider) {
+        self.clipboard_provider = Box::new(arc_swap::access::Constant(provider));
+    }
     pub fn new(clipboard_provider: Box<dyn DynAccess<ClipboardProvider>>) -> Self {
         Self {
             inner: Default::default(),

@@ -37,8 +37,9 @@ All shortcuts/keymaps can be found [in the documentation on the website](https:/
 - Built-in language server support
 - Smart, incremental syntax highlighting and code editing via tree-sitter
 
-Although it's primarily a terminal-based editor, I am interested in exploring
-a custom renderer (similar to Emacs) using wgpu.
+This checkout also includes a [GPUI desktop frontend](./helix-gpui/README.md).
+Run `cargo run -p helix-gpui -- [files]` to open a graphical window using the
+shared Helix editor, GPUI buffer rendering, interactive lists and desktop menus.
 
 Note: Only certain languages have indentation definitions at the moment. Check
 `runtime/queries/<lang>/` for `indents.scm`.

@@ -159,6 +159,7 @@ where
         }
         let previous_buffer = &self.buffers[1 - self.current];
         let current_buffer = &self.buffers[self.current];
+        self.backend.prepare_frame(current_buffer);
         let updates = previous_buffer.diff(current_buffer);
         self.backend.draw(updates.into_iter())
     }

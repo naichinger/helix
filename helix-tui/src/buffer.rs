@@ -165,6 +165,9 @@ pub struct Buffer {
     /// The content of the buffer. The length of this Vec should always be equal to area.width *
     /// area.height
     pub content: Vec<Cell>,
+    /// Interactive list regions, for frontends that render native list elements.
+    /// Coordinates use the same grapheme grid as the surrounding surface.
+    pub lists: Vec<Rect>,
 }
 
 impl Buffer {
@@ -179,7 +182,11 @@ impl Buffer {
     pub fn filled(area: Rect, cell: &Cell) -> Buffer {
         let size = area.area();
         let content = vec![cell.clone(); size];
-        Buffer { area, content }
+        Buffer {
+            area,
+            content,
+            lists: Vec::new(),
+        }
     }
 
     /// Returns a Buffer containing the given lines
@@ -651,6 +658,7 @@ impl Buffer {
     /// Resize the buffer so that the mapped area matches the given area and that the buffer
     /// length is equal to area.width * area.height
     pub fn resize(&mut self, area: Rect) {
+        self.lists.clear();
         let length = area.area();
         if self.content.len() > length {
             self.content.truncate(length);
@@ -662,6 +670,7 @@ impl Buffer {
 
     /// Reset all cells in the buffer
     pub fn reset(&mut self) {
+        self.lists.clear();
         for c in &mut self.content {
             c.reset();
         }

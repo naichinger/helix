@@ -24,6 +24,10 @@ pub use self::test::TestBackend;
 
 /// Representation of a terminal backend.
 pub trait Backend {
+    /// Receive semantic surface regions before the cell diff is drawn.
+    fn prepare_frame(&mut self, _surface: &crate::buffer::Buffer) {}
+    /// Graphical backends receive their dimensions from input events.
+    fn set_size(&mut self, _area: Rect) {}
     /// Claims the terminal for TUI use.
     fn claim(&mut self) -> Result<(), io::Error>;
     /// Update terminal configuration.
